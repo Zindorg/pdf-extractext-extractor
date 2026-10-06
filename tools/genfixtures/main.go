@@ -10,8 +10,6 @@ package main
 
 import (
 	"bytes"
-	"crypto/aes"
-	"crypto/cipher"
 	"crypto/md5"
 	"crypto/rc4"
 	"encoding/binary"
@@ -50,10 +48,17 @@ func main() {
 		os.Exit(1)
 	}
 
+	cifrado, err := pdfCifrado()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+
 	ficheros := map[string][]byte{
 		"valido.pdf":    pdfValido(),
 		"sin_texto.pdf": pdfSinTexto(),
-		"cifrado.pdf":   pdfCifrado(),
+		"cifrado.pdf":   cifrado,
+		"corrupto.pdf":  pdfCorrupto(),
 	}
 
 	for nombre, contenido := range ficheros {
@@ -142,24 +147,41 @@ func pdfSinTexto() []byte {
 	return escribirPDF(paginaDevuelve(2, nil), 1, 0)
 }
 
-// ---------------------------------------------------------------- PDF cifrado
+// ---------------------------------------------------------------- PDF cifrar
 
-func pdfCifrado() []byte {
+// pdfCifrado escribe un documento con cifrado RC4 de 40 bits (/V 1 /R 2), la
+// revisión más antigua de la norma y la única que poppler acepta sin exigir
+// además las claves de permisos /OE y /UE, que esta estructura no lleva.
+//
+// La contraseña de usuario es "secreto": quien no la conoce recibe
+// "Command Line Error: Incorrect password" con código de salida 1, que es el
+// comportamiento que clasifica domain.ErrEncryptedDocument.
+func pdfCifrado() ([]byte, error) {
 	const paginas = 1
 
 	objetos := paginaDevuelve(paginas, []string{
-		"cifrado.pdf\ndocumento protegido con AES-128",
+		"cifrado.pdf\ndocumento protegido con contraseña",
 	})
 
-	clave := claveFichero(rellenarClave("secreto"), valorO("secreto", ""), idFichero)
+	o := valorO("secreto", "proteccion")
+	clave := claveFichero(rellenarClave("secreto"), o, idFichero)
 
 	// Solo los flujos llevan datos que cifrar: el resto del documento son
 	// números y nombres, que no se cifran.
 	for i := range objetos {
-		if objetos[i].flujo != nil {
-			objetos[i].flujo = cifrarFlujo(clave, objetos[i].numero, 0, objetos[i].flujo)
-			objetos[i].cuerpo = []byte(fmt.Sprintf("<< /Length %d >>", len(objetos[i].flujo)))
+		if objetos[i].flujo == nil {
+			continue
 		}
+
+		plano := objetos[i].flujo
+		cifrado := cifrarFlujo(clave, objetos[i].numero, 0, plano)
+
+		if err := comprobarDescifrado(clave, objetos[i].numero, cifrado, plano); err != nil {
+			return nil, fmt.Errorf("cifrado.pdf: %w", err)
+		}
+
+		objetos[i].flujo = cifrado
+		objetos[i].cuerpo = []byte(fmt.Sprintf("<< /Length %d >>", len(cifrado)))
 	}
 
 	// La fuente ocupa el objeto 3 + 2*páginas; el /Encrypt va detrás.
@@ -168,17 +190,30 @@ func pdfCifrado() []byte {
 	objetos = append(objetos, objeto{
 		numero: numeroCifrado,
 		cuerpo: []byte(fmt.Sprintf(
-			"<< /Filter /Standard /V 4 /R 6 /Length 128 /P %d "+
-				"/O <%s> /U <%s> "+
-				"/CF << /StdCF << /CFM /AESV2 /AuthEvent /DocOpen /Length 16 >> >> "+
-				"/StmF /StdCF /StrF /StdCF >>",
+			"<< /Filter /Standard /V 1 /R 2 /Length 40 /P %d "+
+				"/O <%s> /U <%s> >>",
 			permisos,
-			hex.EncodeToString(valorO("secreto", "")),
-			hex.EncodeToString(valorU(idFichero)),
+			hex.EncodeToString(o),
+			hex.EncodeToString(valorU(clave)),
 		)),
 	})
 
-	return escribirPDF(objetos, 1, numeroCifrado)
+	return escribirPDF(objetos, 1, numeroCifrado), nil
+}
+
+// pdfCorrupto devuelve un PDF válido cortado antes de la xref y del trailer.
+// poppler no encuentra el diccionario de trailer y falla con "Syntax Error"
+// sin mencionar ninguna contraseña: exactamente lo que el clasificador de
+// errores debe distinguir de un documento cifrado.
+func pdfCorrupto() []byte {
+	valido := pdfValido()
+
+	corte := bytes.Index(valido, []byte("xref"))
+	if corte <= 0 {
+		corte = len(valido) / 2
+	}
+
+	return valido[:corte]
 }
 
 // ------------------------------------------------------------------ escritor
@@ -217,7 +252,7 @@ func escribirPDF(objetos []objeto, raiz, cifrado int) []byte {
 	return b.Bytes()
 }
 
-// ------------------------------------------------- manejador de seguridad (AESV2)
+// ------------------------------------------- manejador de seguridad (RC4, R 2)
 
 // rellenarClaveAlgoritmo2 recorta o rellena la contraseña hasta 32 bytes.
 func rellenarClave(password string) []byte {
@@ -227,14 +262,14 @@ func rellenarClave(password string) []byte {
 	return b
 }
 
-// valorO implementa el Algoritmo 3. El /O se cifra con RC4 siempre, incluso
-// con /V 4 en AES: es el único punto del repositorio que usa RC4 y lo hace por
-// norma, no por gusto.
+// valorO implementa el Algoritmo 3 en su variante de revisión 2: una sola
+// pasada de RC4 sobre la contraseña de usuario rellenada. El /O se cifra con
+// RC4 siempre, incluso con revisiones superiores: es el único punto del
+// repositorio que usa RC4 y lo hace por norma, no por gusto.
 //
 //nolint:staticcheck // SA1019: el Algoritmo 3 del PDF 32000-1 obliga a RC4 para /O
 func valorO(usuario, duenho string) []byte {
-	duenhoRelleno := rellenarClave(duenho)
-	suma := md5.Sum(duenhoRelleno)
+	suma := md5.Sum(rellenarClave(duenho))
 
 	c, err := rc4.NewCipher(suma[:5])
 	if err != nil {
@@ -242,17 +277,18 @@ func valorO(usuario, duenho string) []byte {
 	}
 
 	datos := rellenarClave(usuario)
-	for i := 0; i < 20; i++ {
-		dato := make([]byte, len(datos))
-		c.XORKeyStream(dato, datos)
-		datos = dato
-	}
+	salida := make([]byte, len(datos))
+	c.XORKeyStream(salida, datos)
 
-	return datos
+	return salida
 }
 
-// claveFichero implementa el Algoritmo 2 para /R 6 con longitud de clave 128.
-func claveFichero(usuario, o []byte, id []byte) []byte {
+// claveFichero implementa el Algoritmo 2 del PDF 32000-1, tabla 3.13:
+// MD5(contraseña + O + P + ID), una sola pasada y 5 bytes de salida en la
+// revisión 2: ni las 50 iteraciones ni el recorte a n bytes aplican hasta la
+// revisión 3, pero el /P se suma desde la revisión 2. El /ID se toma entero,
+// tal y como hace poppler en Decrypt::makeFileKey2.
+func claveFichero(usuario, o, id []byte) []byte {
 	p := make([]byte, 4)
 	binary.LittleEndian.PutUint32(p, uint32(permisos))
 
@@ -263,29 +299,22 @@ func claveFichero(usuario, o []byte, id []byte) []byte {
 	h.Write(id)
 	suma := h.Sum(nil)
 
-	// /R >= 3: otras 50 iteraciones sobre los primeros 16 bytes.
-	for i := 0; i < 50; i++ {
-		s := md5.Sum(suma[:16])
-		suma = s[:]
-	}
-
-	return suma[:16]
+	return suma[:5]
 }
 
-// valorU implementa el Algoritmo 5 para /R >= 3: 16 bytes de hash y 32 de relleno.
-func valorU(id []byte) []byte {
-	h := md5.New()
-	h.Write(relleno)
-	h.Write(id)
-	suma := h.Sum(nil)
-
-	for i := 0; i < 50; i++ {
-		s := md5.Sum(suma[:16])
-		suma = s[:]
+// valorU implementa el Algoritmo 5 en su variante de revisión 2: RC4 de la
+// cadena de relleno con la clave del fichero. Devuelve 32 bytes.
+//
+//nolint:staticcheck // SA1019: el Algoritmo 5 del PDF 32000-1 obliga a RC4 para /U
+func valorU(clave []byte) []byte {
+	c, err := rc4.NewCipher(clave)
+	if err != nil {
+		panic(err)
 	}
 
-	u := make([]byte, 48)
-	copy(u, suma[:16])
+	u := make([]byte, len(relleno))
+	c.XORKeyStream(u, relleno)
+
 	return u
 }
 
@@ -307,31 +336,56 @@ func claveObjeto(clave []byte, numero, generacion int) []byte {
 	return h.Sum(nil)[:n]
 }
 
+// cifrarFlujo aplica el Algoritmo 1: RC4 con la clave por objeto. La clave se
+// deriva del número y la generación, así que dos objetos con el mismo texto
+// producen bytes distintos, como exige la norma.
+//
+//nolint:staticcheck // SA1019: el Algoritmo 1 del PDF 32000-1 obliga a RC4 en /R 2
 func cifrarFlujo(clave []byte, numero, generacion int, datos []byte) []byte {
-	bloque, err := aes.NewCipher(claveObjeto(clave, numero, generacion))
+	c, err := rc4.NewCipher(claveObjeto(clave, numero, generacion))
 	if err != nil {
 		panic(err)
 	}
 
-	// IV fijo derivado del número de objeto: AES lo toma del principio del
-	// flujo, y un IV aleatorio haría la salida irreproducible. Es un fixture de
-	// prueba, no criptografía de producción.
-	iv := iv(numero, generacion)
+	salida := make([]byte, len(datos))
+	c.XORKeyStream(salida, datos)
 
-	rellenoPKCS5 := aes.BlockSize - len(datos)%aes.BlockSize
-	padded := make([]byte, 0, len(datos)+rellenoPKCS5)
-	padded = append(padded, datos...)
-	padded = append(padded, bytes.Repeat([]byte{byte(rellenoPKCS5)}, rellenoPKCS5)...)
-
-	cifrado := make([]byte, len(padded))
-	cipher.NewCBCEncrypter(bloque, iv).CryptBlocks(cifrado, padded)
-
-	return append(iv, cifrado...)
+	return salida
 }
 
-func iv(numero, generacion int) []byte {
-	h := md5.New()
-	fmt.Fprintf(h, "extractor-fixture:%d:%d", numero, generacion)
-	suma := h.Sum(nil)
-	return suma[:aes.BlockSize]
+// descifrarFlujo deshace cifrarFlujo. RC4 es un simple XOR contra un flujo de
+// claves, así que descifrar es aplicar la misma operación: la clave por objeto
+// y su longitud son lo único que distingue una llamada de otra.
+//
+// Devuelve error porque el llamante lo usa para verificar que el fixture que va
+// a escribir es legible, y esa verificación tiene que poder fallar.
+//
+//nolint:staticcheck // SA1019: el Algoritmo 1 del PDF 32000-1 obliga a RC4 en /R 2
+func descifrarFlujo(clave []byte, numero, generacion int, datos []byte) ([]byte, error) {
+	c, err := rc4.NewCipher(claveObjeto(clave, numero, generacion))
+	if err != nil {
+		return nil, err
+	}
+
+	plano := make([]byte, len(datos))
+	c.XORKeyStream(plano, datos)
+
+	return plano, nil
+}
+
+// comprobarDescifrado hace el viaje de ida y vuelta sobre un flujo recién
+// cifrado. Si el resultado no devuelve el texto original, el PDF que se va a
+// escribir sería ilegible: se aborta la generación en lugar de dejar un
+// fixture roto en testdata/.
+func comprobarDescifrado(clave []byte, numero int, cifrado, plano []byte) error {
+	descifrado, err := descifrarFlujo(clave, numero, 0, cifrado)
+	if err != nil {
+		return fmt.Errorf("objeto %d: no se pudo descifrar: %w", numero, err)
+	}
+
+	if !bytes.Equal(descifrado, plano) {
+		return fmt.Errorf("objeto %d: el flujo descifrado no devuelve el texto original", numero)
+	}
+
+	return nil
 }
