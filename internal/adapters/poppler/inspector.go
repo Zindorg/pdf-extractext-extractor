@@ -1,9 +1,8 @@
 package poppler
 
 import (
+	"bytes"
 	"context"
-	"errors"
-	"os/exec"
 	"strconv"
 	"strings"
 
@@ -86,6 +85,8 @@ func text(ctx context.Context, src domain.DocumentSource) (string, error) {
 // El stream se entrega a exec tal cual: cuando es un fichero, el hijo recibe
 // el descriptor sin intermediarios, con tamaño conocido y con acceso aleatorio,
 // que es lo que pdfinfo y pdftotext necesitan para localizar la tabla xref.
+// Ante un fallo se condensa en un runDiagnostics (código de salida + stderr) y
+// se delega en classifyReport la traducción al motivo de dominio.
 func runPoppler(ctx context.Context, src domain.DocumentSource, programa string, args ...string) ([]byte, error) {
 	entrada, err := src.Open()
 	if err != nil {
@@ -93,46 +94,22 @@ func runPoppler(ctx context.Context, src domain.DocumentSource, programa string,
 	}
 	defer entrada.Close()
 
-	mando := exec.CommandContext(ctx, programa, args...)
+	mando := popplerCommand(ctx, programa, args...)
 	mando.Stdin = entrada
 
-	salida, err := mando.Output()
-	if err == nil {
-		return salida, nil
+	var salida, errores bytes.Buffer
+	mando.Stdout = &salida
+	mando.Stderr = &errores
+
+	if err := mando.Run(); err != nil {
+		reporte := runDiagnostics{ExitCode: 0, Stderr: errores.String()}
+		if mando.ProcessState != nil {
+			reporte.ExitCode = mando.ProcessState.ExitCode()
+		}
+		return nil, classifyReport(ctx, reporte)
 	}
 
-	return nil, classifyError(ctx, err)
-}
-
-// classifyError traduce un fallo de poppler a uno de los motivos de fallo del
-// dominio. Es el único punto del adaptador que mira el stderr, y lo hace en
-// este orden:
-//
-//  1. el contexto ya no está vivo: el proceso murió por nuestra cuenta;
-//  2. poppler menciona una contraseña: el documento está cifrado;
-//  3. cualquier otro fallo: el documento está roto.
-//
-// Solo se clasifican los procesos que terminan con error. poppler escribe
-// avisos de sintaxis en el stderr incluso cuando el resultado es utilizable,
-// y esos no invalidan la extracción.
-//
-// Deuda conocida: el punto 1 funde la cancelación del cliente con el plazo
-// agotado, que en el contrato HTTP son dos cosas distintas —EXTRACTION_TIMEOUT
-// responde 504 y CANCELED no escribe respuesta. Hoy no existe sentinela ni
-// test que las distinga, así que se comportan igual; separarlas es un ciclo
-// con su propia prueba.
-func classifyError(ctx context.Context, err error) error {
-	if ctx.Err() != nil {
-		return domain.ErrExtractionTimeout
-	}
-
-	var salida *exec.ExitError
-	if errors.As(err, &salida) &&
-		strings.Contains(strings.ToLower(string(salida.Stderr)), "password") {
-		return domain.ErrEncryptedDocument
-	}
-
-	return domain.ErrCorruptDocument
+	return salida.Bytes(), nil
 }
 
 var _ domain.TextExtractor = (*Inspector)(nil)
