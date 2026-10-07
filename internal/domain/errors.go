@@ -10,4 +10,5 @@ var (
 	ErrEncryptedDocument = errors.New("document is encrypted")
 	ErrDocumentTooLarge  = errors.New("document exceeds the maximum allowed size")
 	ErrExtractionTimeout = errors.New("extraction deadline exceeded")
+	ErrResourceExhausted = errors.New("no workers available")
 )
