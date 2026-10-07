@@ -1,14 +1,13 @@
 package api
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
-	"io"
 	"net/http"
 	"time"
 
+	"github.com/Zindorg/pdf-extractext-extractor/internal/adapters/ram"
 	"github.com/Zindorg/pdf-extractext-extractor/internal/domain"
 )
 
@@ -33,13 +32,14 @@ func NewExtractionHandler(service ExtractionService) *ExtractionHandler {
 	return &ExtractionHandler{service: service}
 }
 
-// HandleExtract atiende POST /extract: acota el cuerpo, lo vuelve reabrible,
-// delega en el caso de uso y traduce el resultado o el fallo al contrato.
+// HandleExtract atiende POST /extract: acota el cuerpo, lo vuelca a un memfd
+// (§8: cero disco y cero heap de Go), delega en el caso de uso y traduce el
+// resultado o el fallo al contrato. El memfd muere con esta llamada.
 func (h *ExtractionHandler) HandleExtract(w http.ResponseWriter, r *http.Request) {
 	empezado := time.Now()
 	r.Body = http.MaxBytesReader(w, r.Body, maxDocumentBytes)
 
-	fuente, err := nuevaFuente(r.Body)
+	fichero, err := ram.NewBuffer(r.Body)
 	if err != nil {
 		var cuerpoExcesivo *http.MaxBytesError
 		if errors.As(err, &cuerpoExcesivo) {
@@ -49,8 +49,9 @@ func (h *ExtractionHandler) HandleExtract(w http.ResponseWriter, r *http.Request
 		escribirError(w, err, r.URL.Path)
 		return
 	}
+	defer fichero.Close()
 
-	resultado, err := h.service.Process(r.Context(), fuente)
+	resultado, err := h.service.Process(r.Context(), ram.Source(fichero))
 	if err != nil {
 		escribirError(w, err, r.URL.Path)
 		return
@@ -63,30 +64,6 @@ func (h *ExtractionHandler) HandleExtract(w http.ResponseWriter, r *http.Request
 func (h *ExtractionHandler) HandleHealth(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(saludResponse{Status: "ok"})
-}
-
-// heapSource adapta un cuerpo ya leído al puerto DocumentSource: cada llamada
-// a Open() devuelve un lector desde el principio.
-//
-// Puente provisional: §8 y §9 quieren un memfd (internal/adapters/ram/buffer.go,
-// su issue), que vuelca el body a RAM anónima sin pasar por el heap de Go.
-// Hasta que exista, el documento queda materializado en este slice.
-type heapSource struct {
-	contenido []byte
-}
-
-func (s heapSource) Open() (io.ReadCloser, error) {
-	return io.NopCloser(bytes.NewReader(s.contenido)), nil
-}
-
-// nuevaFuente vuelca un lector en una fuente reabrible, o devuelve el error
-// que lo impidió: un *http.MaxBytesError cuando el cuerpo rebasa la cota.
-func nuevaFuente(r io.Reader) (domain.DocumentSource, error) {
-	contenido, err := io.ReadAll(r)
-	if err != nil {
-		return nil, err
-	}
-	return heapSource{contenido: contenido}, nil
 }
 
 // extraccionResponse es el cuerpo del 200 (§5), con document_id en eco.
