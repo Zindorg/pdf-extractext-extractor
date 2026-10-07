@@ -1,0 +1,16 @@
+services:
+  extractor:
+    build: .
+    ports:
+      - "8080:8080"
+    environment:
+      # Nombres reales de §9 (internal/config): HTTP_PORT y MAX_IN_FLIGHT. El
+      # pool 4 limita las extracciones concurrentes a 4 procesos de poppler.
+      HTTP_PORT: "8080"
+      MAX_IN_FLIGHT: "4"
+    # Zero-Disk (§8): el documento se vuelca a un memfd del kernel, poppler lee
+    # por stdin y escribe a stdout; el proceso no escribe nada en disco.
+    read_only: true
+    # El apagado ordenado de cmd/server usa 25s; Docker por defecto SIGKILL a
+    # los 10s. Con 30s el SIGTERM completa las peticiones en vuelo.
+    stop_grace_period: 30s
