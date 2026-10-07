@@ -1,16 +1,33 @@
 services:
+  proxy:
+    image: caddy:2-alpine
+    # Caddy genera automáticamente el certificado local y balancea entre las réplicas
+    command: caddy reverse-proxy --from https://extract.universidad.localhost --to http://extractor:8080
+    ports:
+      - "80:80"
+      - "443:443"
+    depends_on:
+      - extractor
+
   extractor:
     build: .
-    ports:
-      - "8080:8080"
+    # Se elimina ports: "8080:8080" para que las 5 réplicas no colisionen. 
+    # Solo el proxy expone puertos al exterior.
     environment:
-      # Nombres reales de §9 (internal/config): HTTP_PORT y MAX_IN_FLIGHT. El
-      # pool 4 limita las extracciones concurrentes a 4 procesos de poppler.
+      # Nombres reales de §9 (internal/config): HTTP_PORT y MAX_IN_FLIGHT.
       HTTP_PORT: "8080"
-      MAX_IN_FLIGHT: "4"
-    # Zero-Disk (§8): el documento se vuelca a un memfd del kernel, poppler lee
-    # por stdin y escribe a stdout; el proceso no escribe nada en disco.
+      MAX_IN_FLIGHT: "5" # Cada una de las 5 réplicas tendrá 4 workers (20 concurrentes en total)
+    
+    # Zero-Disk (§8): el documento se vuelca a un memfd del kernel.
     read_only: true
-    # El apagado ordenado de cmd/server usa 25s; Docker por defecto SIGKILL a
-    # los 10s. Con 30s el SIGTERM completa las peticiones en vuelo.
+    
+    # El apagado ordenado de cmd/server usa 25s.
     stop_grace_period: 30s
+    
+    # Configuración estricta del Trabajo Práctico
+    deploy:
+      replicas: 5
+      resources:
+        limits:
+          cpus: '1.0'
+          memory: 1024M
