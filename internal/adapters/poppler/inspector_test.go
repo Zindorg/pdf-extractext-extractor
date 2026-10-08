@@ -148,3 +148,21 @@ func TestExtract_NormalizaElSaltoDePaginaADobleSalto(t *testing.T) {
 		t.Errorf("Text = %q;\nse esperaba %q", resultado.Text, esperado)
 	}
 }
+
+// TestExtract_ConteoDePaginasPorFormFeed valida que el conteo de páginas
+// proviene del carácter \f en la salida cruda de pdftotext.
+func TestExtract_ConteoDePaginasPorFormFeed(t *testing.T) {
+	// Este test usa el fixture "valido.pdf" que sabemos tiene 2 páginas
+	// (contiene un \f entre página 1 y 2).
+	inspector := New()
+	resultado, err := inspector.Extract(context.Background(), sourceFor(t, "valido.pdf"))
+
+	if err != nil {
+		t.Fatalf("se esperaba extracción correcta, err = %v", err)
+	}
+
+	// valido.pdf tiene 2 páginas → 1 salto de página \f
+	if resultado.PageCount != 2 {
+		t.Errorf("PageCount = %d; se esperaba 2 (basado en conteo de \\f)", resultado.PageCount)
+	}
+}
