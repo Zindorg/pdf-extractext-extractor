@@ -1,6 +1,6 @@
 import http from 'k6/http';
 import { Trend } from 'k6/metrics';
-import { check } from 'k6';
+import { check, sleep } from 'k6';
 
 const statusTrend = new Trend('status_codes');
 
@@ -10,6 +10,11 @@ export const options = {
         { duration: '20s', target: 100 },
         { duration: '10s', target: 0 },
     ],
+    thresholds: {
+        http_req_failed: ['rate==0'],
+        http_req_duration: ['max<15000'],
+    },
+    discardResponseBodies: true,
 };
 
 const BASE_URL = 'https://extract.universidad.localhost';

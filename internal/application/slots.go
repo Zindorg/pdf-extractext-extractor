@@ -1,29 +1,59 @@
 package application
 
-// WorkerPool es la admisión: N huecos de extracción simultáneos. Si no queda
-// ninguno libre, la petición se rechaza en el acto, sin cola (§8, paso 2).
+import (
+	"context"
+	"sync/atomic"
+
+	"github.com/Zindorg/pdf-extractext-extractor/internal/domain"
+)
+
+// WorkerPool es la admisión: N huecos de extracción simultáneos con cola
+// acotada. Si no hay hueco libre, la petición espera en cola hasta que se
+// libera uno o expira el contexto (§8, paso 2).
 //
-// Se modela como un canal de tokens vacíos, que es el semáforo canónico de Go:
-// un canal vacío significa que toda la capacidad está libre y uno lleno que se
-// ha agotado.
+// Se modela como un canal de tokens (semáforo) más un contador atómico de
+// esperas en cola para aplicar MAX_QUEUE.
 type WorkerPool struct {
-	slots chan struct{}
+	slots        chan struct{}
+	maxQueue     int32
+	waitingCount int32
 }
 
 // NewWorkerPool devuelve un pool capaz de sostener capacity extracciones a la
-// vez.
-func NewWorkerPool(capacity int) *WorkerPool {
-	return &WorkerPool{slots: make(chan struct{}, capacity)}
+// vez, con una cola de espera de maxQueue peticiones.
+func NewWorkerPool(capacity, maxQueue int) *WorkerPool {
+	return &WorkerPool{
+		slots:    make(chan struct{}, capacity),
+		maxQueue: int32(maxQueue),
+	}
 }
 
-// Acquire toma un hueco si queda alguno libre. Nunca espera: devuelve false en
-// cuanto la capacidad está agotada, para que el llamante rechace la petición.
-func (p *WorkerPool) Acquire() bool {
+// Acquire toma un hueco si queda alguno libre. Si no hay hueco, se encola
+// hasta que se libera uno o el contexto expira. Devuelve error si el contexto
+// se cancela (ErrQueueTimeout) o si la cola está llena (ErrResourceExhausted).
+func (p *WorkerPool) Acquire(ctx context.Context) error {
 	select {
 	case p.slots <- struct{}{}:
-		return true
+		return nil
 	default:
-		return false
+	}
+
+	if p.maxQueue == 0 {
+		return domain.ErrResourceExhausted
+	}
+
+	waiting := atomic.AddInt32(&p.waitingCount, 1)
+	if waiting > p.maxQueue {
+		atomic.AddInt32(&p.waitingCount, -1)
+		return domain.ErrResourceExhausted
+	}
+	defer atomic.AddInt32(&p.waitingCount, -1)
+
+	select {
+	case p.slots <- struct{}{}:
+		return nil
+	case <-ctx.Done():
+		return domain.ErrQueueTimeout
 	}
 }
 

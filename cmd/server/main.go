@@ -40,13 +40,20 @@ func run() error {
 		capacidad = runtime.NumCPU() // §9: MAX_IN_FLIGHT=0 significa NumCPU
 	}
 
+	maxQueue := cfg.MaxQueue
+	if maxQueue == 0 {
+		maxQueue = 128
+	}
+
 	servidor := &http.Server{
 		Addr: ":" + cfg.Port,
 		Handler: api.NewRouter(
 			api.NewExtractionHandler(
 				application.NewExtractionService(
 					poppler.New(),
-					application.NewWorkerPool(capacidad),
+					application.NewWorkerPool(capacidad, maxQueue),
+					cfg.QueueWaitTimeout,
+					cfg.ExtractTimeout,
 				),
 			),
 		),

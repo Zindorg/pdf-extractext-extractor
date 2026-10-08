@@ -11,4 +11,5 @@ var (
 	ErrDocumentTooLarge  = errors.New("document exceeds the maximum allowed size")
 	ErrExtractionTimeout = errors.New("extraction deadline exceeded")
 	ErrResourceExhausted = errors.New("no workers available")
+	ErrQueueTimeout      = errors.New("queue wait deadline exceeded")
 )

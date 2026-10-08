@@ -29,6 +29,7 @@ COPY --from=builder /extractor /extractor
 # El defecto local de la app es 8081 (§9); la imagen lo marca en 8080 para que
 # un `docker run` suelto matchee el EXPOSE. docker-compose lo inyecta igual.
 ENV HTTP_PORT=8080
+ENV GOMAXPROCS=1
 
 EXPOSE 8080
 

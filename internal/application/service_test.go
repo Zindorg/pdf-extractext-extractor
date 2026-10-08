@@ -6,6 +6,7 @@ import (
 	"io"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/Zindorg/pdf-extractext-extractor/internal/domain"
 )
@@ -45,8 +46,8 @@ func (emptySource) Open() (io.ReadCloser, error) {
 // Si el hueco no se liberara, esta segunda llamada en serie devolvería
 // ErrResourceExhausted y el servicio se quedaría sin capacidad para siempre.
 func TestProcess_LiberaElHuecoTrasLaExtraccion(t *testing.T) {
-	pool := NewWorkerPool(1)
-	servicio := NewExtractionService(fixedExtractor{}, pool)
+	pool := NewWorkerPool(1, 128)
+	servicio := NewExtractionService(fixedExtractor{}, pool, 8*time.Second, 4*time.Second)
 
 	resultado, err := servicio.Process(context.Background(), emptySource{})
 	if err != nil {
@@ -61,14 +62,15 @@ func TestProcess_LiberaElHuecoTrasLaExtraccion(t *testing.T) {
 	}
 }
 
-// Sin hueco libre la admisión es inmediata: no se espera a que nadie termine.
+// Sin hueco libre y sin cola (maxQueue=0), la admisión es inmediata: devuelve
+// ErrResourceExhausted sin esperar.
 func TestProcess_DevuelveErrResourceExhaustedSinHuecoLibre(t *testing.T) {
-	pool := NewWorkerPool(1)
+	pool := NewWorkerPool(1, 0)
 	extractor := &blockingExtractor{
 		entered: make(chan struct{}, 1),
 		unblock: make(chan struct{}),
 	}
-	servicio := NewExtractionService(extractor, pool)
+	servicio := NewExtractionService(extractor, pool, 8*time.Second, 4*time.Second)
 
 	var errOcupada error
 	terminada := make(chan struct{})
@@ -97,14 +99,15 @@ func TestProcess_DevuelveErrResourceExhaustedSinHuecoLibre(t *testing.T) {
 // Un Release sin ningún hueco tomado no debe bloquear la goroutine que lo llama
 // ni, tampoco, fabricar un cupo por encima de la capacidad del pool.
 func TestWorkerPool_ReleaseAdicionalNoSaturaElPool(t *testing.T) {
-	pool := NewWorkerPool(1)
+	pool := NewWorkerPool(1, 0)
 
 	pool.Release()
 
-	if !pool.Acquire() {
-		t.Error("Acquire() debía conceder el único hueco libre")
+	ctx := context.Background()
+	if err := pool.Acquire(ctx); err != nil {
+		t.Errorf("Acquire() debía conceder el único hueco libre: %v", err)
 	}
-	if pool.Acquire() {
-		t.Error("Acquire() concedió un segundo hueco con un pool de capacidad 1")
+	if err := pool.Acquire(ctx); !errors.Is(err, domain.ErrResourceExhausted) {
+		t.Errorf("Acquire() concedió un segundo hueco con un pool de capacidad 1: %v", err)
 	}
 }

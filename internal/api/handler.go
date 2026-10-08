@@ -111,6 +111,7 @@ var motivos = []causa{
 	{err: domain.ErrEncryptedDocument, status: http.StatusUnprocessableEntity, title: "Unprocessable Entity", sufijo: "encrypted-document"},
 	{err: domain.ErrCorruptDocument, status: http.StatusUnprocessableEntity, title: "Unprocessable Entity", sufijo: "corrupt-document"},
 	{err: domain.ErrResourceExhausted, status: http.StatusTooManyRequests, title: "Too Many Requests", sufijo: "resource-exhausted", retryAfter: "1"},
+	{err: domain.ErrQueueTimeout, status: http.StatusServiceUnavailable, title: "Service Unavailable", sufijo: "queue-timeout", retryAfter: "5"},
 	{err: domain.ErrExtractionTimeout, status: http.StatusGatewayTimeout, title: "Gateway Timeout", sufijo: "extraction-timeout"},
 }
 
