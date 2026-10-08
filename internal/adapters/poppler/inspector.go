@@ -3,7 +3,6 @@ package poppler
 import (
 	"bytes"
 	"context"
-	"strconv"
 	"strings"
 
 	"github.com/Zindorg/pdf-extractext-extractor/internal/domain"
@@ -12,31 +11,24 @@ import (
 // Inspector implementa domain.TextExtractor sobre el motor poppler.
 type Inspector struct{}
 
-// New construye el Inspector.
 func New() *Inspector {
 	return &Inspector{}
 }
 
-// Extract consulta a poppler dos veces —una para las páginas y otra para el
-// texto— y le pasa el documento por la entrada estándar en ambas.
-//
-// El stream que entrega el DocumentSource va al hijo sin pasar por el heap de
-// Go y sin tocar el disco: no se guarda ninguna copia, de modo que el tamaño
-// del documento no cuenta contra el presupuesto de memoria de la aplicación.
 func (i *Inspector) Extract(ctx context.Context, src domain.DocumentSource) (*domain.ExtractionResult, error) {
-	paginas, err := pageCount(ctx, src)
+	textoCrudo, err := text(ctx, src)
 	if err != nil {
 		return nil, err
 	}
 
-	texto, err := text(ctx, src)
-	if err != nil {
-		return nil, err
+	// Contar páginas: cada \f = salto de página en pdftotext
+	paginas := strings.Count(textoCrudo, "\f")
+	if paginas == 0 && len(textoCrudo) > 0 {
+		paginas = 1 // fallback: PDF de una página sin \f final
 	}
 
-	// pdftotext separa las páginas con un salto de página (form feed). El
-	// contrato del dominio es texto plano, así que aquí es donde se traduce.
-	texto = strings.TrimSpace(strings.ReplaceAll(texto, "\f", "\n\n"))
+	// Normalizar saltos de página a párrafos
+	texto := strings.TrimSpace(strings.ReplaceAll(textoCrudo, "\f", "\n\n"))
 	if texto == "" {
 		return nil, domain.ErrNoTextLayer
 	}
@@ -44,38 +36,12 @@ func (i *Inspector) Extract(ctx context.Context, src domain.DocumentSource) (*do
 	return domain.NewExtractionResult(texto, paginas), nil
 }
 
-// pageCount ejecuta pdfinfo y lee el campo "Pages:" de su informe.
-func pageCount(ctx context.Context, src domain.DocumentSource) (int, error) {
-	salida, err := runPoppler(ctx, src, "pdfinfo", "-")
-	if err != nil {
-		return 0, err
-	}
-
-	for _, linea := range strings.Split(string(salida), "\n") {
-		campo, valor, hayValor := strings.Cut(linea, ":")
-		if !hayValor || campo != "Pages" {
-			continue
-		}
-
-		paginas, err := strconv.Atoi(strings.TrimSpace(valor))
-		if err != nil {
-			return 0, domain.ErrCorruptDocument
-		}
-
-		return paginas, nil
-	}
-
-	return 0, domain.ErrCorruptDocument
-}
-
-// text ejecuta pdftotext: el primer guion lee de la entrada estándar y el
-// segundo escribe en la salida estándar.
+// text ejecuta pdftotext y devuelve el texto crudo (con \f).
 func text(ctx context.Context, src domain.DocumentSource) (string, error) {
 	salida, err := runPoppler(ctx, src, "pdftotext", "-", "-")
 	if err != nil {
 		return "", err
 	}
-
 	return string(salida), nil
 }
 
