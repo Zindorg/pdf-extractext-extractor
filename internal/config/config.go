@@ -10,93 +10,147 @@ import (
 // Config agrupa la configuración de arranque (§9). Todo llega por variables de
 // entorno y se valida en la frontera: un valor inválido impide arrancar.
 type Config struct {
-	Port             string
-	WorkerPoolSize   int
-	MaxQueue         int
+	// Server
+	Port string
+
+	// Admission control (worker pool)
+	MaxInFlight int
+	MaxQueue    int
+
+	// Timeouts
 	QueueWaitTimeout time.Duration
 	ExtractTimeout   time.Duration
+	ShutdownGrace    time.Duration
+
+	// Limits
+	MaxDocumentBytes int64
 }
 
 // Nombres de las variables de entorno y defectos que fija §9.
 const (
-	envPort             = "HTTP_PORT"
-	envMaxInFlight      = "MAX_IN_FLIGHT"
-	envMaxQueue         = "MAX_QUEUE"
+	// Server
+	envPort = "HTTP_PORT"
+	defaultPort = "8081"
+
+	// Admission control
+	envMaxInFlight = "MAX_IN_FLIGHT"
+	envMaxQueue    = "MAX_QUEUE"
+	defaultMaxInFlight = 0 // 0 means runtime.NumCPU()
+	defaultMaxQueue = 128
+
+	// Timeouts
 	envQueueWaitTimeout = "QUEUE_WAIT_TIMEOUT"
 	envExtractTimeout   = "EXTRACT_TIMEOUT"
-	defaultPort         = "8081"
-	defaultPoolSize     = 0 // 0 significa runtime.NumCPU(), que resuelve el main
-	defaultMaxQueue     = 128
+	envShutdownGrace    = "SHUTDOWN_GRACE"
 	defaultQueueWait    = 10 * time.Second
 	defaultExtractWait  = 6 * time.Second
+	defaultShutdownGrace = 25 * time.Second
+
+	// Limits
+	envMaxDocumentBytes = "MAX_DOCUMENT_BYTES"
+	defaultMaxDocumentBytes = 20 * 1024 * 1024 // 20 MiB
 )
 
 // LoadFromEnv lee y valida la configuración del entorno.
 func LoadFromEnv() (*Config, error) {
-	puerto := os.Getenv(envPort)
-	if puerto == "" {
-		puerto = defaultPort
+	port := os.Getenv(envPort)
+	if port == "" {
+		port = defaultPort
 	}
-	if err := validarPuerto(puerto); err != nil {
+	if err := validatePort(port); err != nil {
 		return nil, err
 	}
 
-	tamano := defaultPoolSize
-	if crudo := os.Getenv(envMaxInFlight); crudo != "" {
-		n, err := strconv.Atoi(crudo)
-		if err != nil {
-			return nil, fmt.Errorf("config: %s debe ser un entero >= 0, se recibió %q", envMaxInFlight, crudo)
-		}
-		tamano = n
-	}
-	if tamano < 0 {
-		return nil, fmt.Errorf("config: %s no puede ser negativo: %d", envMaxInFlight, tamano)
+	maxInFlight, err := parseIntEnv(envMaxInFlight, defaultMaxInFlight, 0, 0)
+	if err != nil {
+		return nil, err
 	}
 
-	maxQueue := defaultMaxQueue
-	if crudo := os.Getenv(envMaxQueue); crudo != "" {
-		n, err := strconv.Atoi(crudo)
-		if err != nil {
-			return nil, fmt.Errorf("config: %s debe ser un entero >= 0, se recibió %q", envMaxQueue, crudo)
-		}
-		maxQueue = n
-	}
-	if maxQueue < 0 {
-		return nil, fmt.Errorf("config: %s no puede ser negativo: %d", envMaxQueue, maxQueue)
+	maxQueue, err := parseIntEnv(envMaxQueue, defaultMaxQueue, 0, 0)
+	if err != nil {
+		return nil, err
 	}
 
-	queueWait := defaultQueueWait
-	if crudo := os.Getenv(envQueueWaitTimeout); crudo != "" {
-		d, err := time.ParseDuration(crudo)
-		if err != nil {
-			return nil, fmt.Errorf("config: %s debe ser una duración válida, se recibió %q", envQueueWaitTimeout, crudo)
-		}
-		queueWait = d
+	queueWait, err := parseDurationEnv(envQueueWaitTimeout, defaultQueueWait)
+	if err != nil {
+		return nil, err
 	}
 
-	extractTimeout := defaultExtractWait
-	if crudo := os.Getenv(envExtractTimeout); crudo != "" {
-		d, err := time.ParseDuration(crudo)
-		if err != nil {
-			return nil, fmt.Errorf("config: %s debe ser una duración válida, se recibió %q", envExtractTimeout, crudo)
-		}
-		extractTimeout = d
+	extractTimeout, err := parseDurationEnv(envExtractTimeout, defaultExtractWait)
+	if err != nil {
+		return nil, err
+	}
+
+	shutdownGrace, err := parseDurationEnv(envShutdownGrace, defaultShutdownGrace)
+	if err != nil {
+		return nil, err
+	}
+
+	maxDocumentBytes, err := parseInt64Env(envMaxDocumentBytes, defaultMaxDocumentBytes, 0)
+	if err != nil {
+		return nil, err
 	}
 
 	return &Config{
-		Port:             puerto,
-		WorkerPoolSize:   tamano,
-		MaxQueue:         maxQueue,
-		QueueWaitTimeout: queueWait,
-		ExtractTimeout:   extractTimeout,
+		Port:              port,
+		MaxInFlight:       maxInFlight,
+		MaxQueue:          maxQueue,
+		QueueWaitTimeout:  queueWait,
+		ExtractTimeout:    extractTimeout,
+		ShutdownGrace:     shutdownGrace,
+		MaxDocumentBytes:  maxDocumentBytes,
 	}, nil
 }
 
-// validarPuerto rechaza todo valor que no sea un puerto TCP del rango válido.
-func validarPuerto(puerto string) error {
-	n, err := strconv.Atoi(puerto)
+func parseIntEnv(key string, defaultVal, min, max int) (int, error) {
+	raw := os.Getenv(key)
+	if raw == "" {
+		return defaultVal, nil
+	}
+	n, err := strconv.Atoi(raw)
+	if err != nil {
+		return 0, fmt.Errorf("config: %s must be an integer >= %d, got %q: %w", key, min, raw, err)
+	}
+	if n < min {
+		return 0, fmt.Errorf("config: %s cannot be negative: %d", key, n)
+	}
+	if max > 0 && n > max {
+		return 0, fmt.Errorf("config: %s cannot exceed %d: %d", key, max, n)
+	}
+	return n, nil
+}
+
+func parseInt64Env(key string, defaultVal int64, min int64) (int64, error) {
+	raw := os.Getenv(key)
+	if raw == "" {
+		return defaultVal, nil
+	}
+	n, err := strconv.ParseInt(raw, 10, 64)
+	if err != nil {
+		return 0, fmt.Errorf("config: %s must be an integer >= %d, got %q: %w", key, min, raw, err)
+	}
+	if n < min {
+		return 0, fmt.Errorf("config: %s cannot be negative: %d", key, n)
+	}
+	return n, nil
+}
+
+func parseDurationEnv(key string, defaultVal time.Duration) (time.Duration, error) {
+	raw := os.Getenv(key)
+	if raw == "" {
+		return defaultVal, nil
+	}
+	d, err := time.ParseDuration(raw)
+	if err != nil {
+		return 0, fmt.Errorf("config: %s must be a valid duration, got %q: %w", key, raw, err)
+	}
+	return d, nil
+}
+
+func validatePort(port string) error {
+	n, err := strconv.Atoi(port)
 	if err != nil || n < 1 || n > 65535 {
-		return fmt.Errorf("config: %s debe ser un puerto entre 1 y 65535, se recibió %q", envPort, puerto)
+		return fmt.Errorf("config: %s must be a port between 1 and 65535, got %q", envPort, port)
 	}
 	return nil
 }

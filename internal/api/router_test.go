@@ -12,7 +12,7 @@ import (
 // El enrutador sirve las rutas de §5: GET /health y POST /extract.
 func TestNewRouter_RegistraLasRutasDeLaSeccion5(t *testing.T) {
 	stub := &stubService{result: domain.NewExtractionResult("Texto extraído", 2)}
-	mux := NewRouter(NewExtractionHandler(stub))
+	mux := NewRouter(NewExtractionHandler(stub, 20*1024*1024))
 
 	recibida := httptest.NewRecorder()
 	mux.ServeHTTP(recibida, httptest.NewRequest(http.MethodGet, "/health", nil))
@@ -53,7 +53,7 @@ func TestNewRouter_RegistraLasRutasDeLaSeccion5(t *testing.T) {
 // Los patrones con método del ServeMux de Go 1.22 rechazan un método no
 // registrado en una ruta conocida.
 func TestNewRouter_RechazaMetodoNoRegistrado(t *testing.T) {
-	mux := NewRouter(NewExtractionHandler(&stubService{}))
+	mux := NewRouter(NewExtractionHandler(&stubService{}, 20*1024*1024))
 
 	recibida := httptest.NewRecorder()
 	mux.ServeHTTP(recibida, httptest.NewRequest(http.MethodPost, "/health", nil))

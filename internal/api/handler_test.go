@@ -68,7 +68,7 @@ func newLazyReader(restantes int64) io.Reader {
 // en eco de la cabecera y el tiempo medido por el propio handler.
 func TestHandleExtract_Devuelve200ConElResultadoCompleto(t *testing.T) {
 	stub := &stubService{result: domain.NewExtractionResult("Texto extraído", 2)}
-	handler := NewExtractionHandler(stub)
+	handler := NewExtractionHandler(stub, 20*1024*1024)
 
 	solicitud := httptest.NewRequest(http.MethodPost, "/extract", strings.NewReader("%PDF-1.4"))
 	solicitud.Header.Set("Content-Type", "application/pdf")
@@ -120,7 +120,7 @@ func TestHandleExtract_Devuelve200ConElResultadoCompleto(t *testing.T) {
 // RFC 9457.
 func TestHandleExtract_RechazaElPayloadPorEncimaDe20MiB(t *testing.T) {
 	stub := &stubService{}
-	handler := NewExtractionHandler(stub)
+	handler := NewExtractionHandler(stub, 20*1024*1024)
 
 	const maxDocumentBytes = 20 * 1024 * 1024
 	solicitud := httptest.NewRequest(http.MethodPost, "/extract", newLazyReader(maxDocumentBytes+1))
@@ -167,7 +167,7 @@ func TestHandleExtract_MapeaLosErroresDeDominio(t *testing.T) {
 	for _, caso := range casos {
 		t.Run(caso.nombre, func(t *testing.T) {
 			stub := &stubService{err: caso.dominio}
-			handler := NewExtractionHandler(stub)
+			handler := NewExtractionHandler(stub, 20*1024*1024)
 
 			solicitud := httptest.NewRequest(http.MethodPost, "/extract", strings.NewReader("%PDF-1.4"))
 			recibida := httptest.NewRecorder()
@@ -212,7 +212,7 @@ func TestHandleExtract_MapeaLosErroresDeDominio(t *testing.T) {
 
 // GET /health es el latido del proceso: 200 con {"status":"ok"} (§5).
 func TestHandleHealth_Devuelve200(t *testing.T) {
-	handler := NewExtractionHandler(&stubService{})
+	handler := NewExtractionHandler(&stubService{}, 20*1024*1024)
 
 	solicitud := httptest.NewRequest(http.MethodGet, "/health", nil)
 	recibida := httptest.NewRecorder()

@@ -18,8 +18,8 @@ func TestLoadFromEnv_UsaLosDefectosDeLaSeccion9(t *testing.T) {
 	if cfg.Port != "8081" {
 		t.Errorf("Port = %q; se esperaba el defecto 8081", cfg.Port)
 	}
-	if cfg.WorkerPoolSize != 0 {
-		t.Errorf("WorkerPoolSize = %d; se esperaba 0 (NumCPU)", cfg.WorkerPoolSize)
+	if cfg.MaxInFlight != 0 {
+		t.Errorf("MaxInFlight = %d; se esperaba 0 (NumCPU)", cfg.MaxInFlight)
 	}
 }
 
@@ -34,8 +34,8 @@ func TestLoadFromEnv_LeeLasVariables(t *testing.T) {
 	if cfg.Port != "9090" {
 		t.Errorf("Port = %q; se esperaba 9090", cfg.Port)
 	}
-	if cfg.WorkerPoolSize != 4 {
-		t.Errorf("WorkerPoolSize = %d; se esperaba 4", cfg.WorkerPoolSize)
+	if cfg.MaxInFlight != 4 {
+		t.Errorf("MaxInFlight = %d; se esperaba 4", cfg.MaxInFlight)
 	}
 }
 

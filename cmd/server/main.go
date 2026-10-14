@@ -17,10 +17,6 @@ import (
 	"github.com/Zindorg/pdf-extractext-extractor/internal/config"
 )
 
-// shutdownGrace es el margen para terminar las extracciones en curso al
-// apagarse, según §9 (SHUTDOWN_GRACE).
-const shutdownGrace = 25 * time.Second
-
 func main() {
 	if err := run(); err != nil {
 		log.Fatal(err)
@@ -35,14 +31,9 @@ func run() error {
 		return err
 	}
 
-	capacidad := cfg.WorkerPoolSize
-	if capacidad == 0 {
-		capacidad = runtime.NumCPU() // §9: MAX_IN_FLIGHT=0 significa NumCPU
-	}
-
-	maxQueue := cfg.MaxQueue
-	if maxQueue == 0 {
-		maxQueue = 128
+	maxInFlight := cfg.MaxInFlight
+	if maxInFlight == 0 {
+		maxInFlight = runtime.NumCPU() // MAX_IN_FLIGHT=0 means NumCPU
 	}
 
 	servidor := &http.Server{
@@ -51,33 +42,35 @@ func run() error {
 			api.NewExtractionHandler(
 				application.NewExtractionService(
 					poppler.New(),
-					application.NewWorkerPool(capacidad, maxQueue),
+					application.NewWorkerPool(maxInFlight, cfg.MaxQueue),
 					cfg.QueueWaitTimeout,
 					cfg.ExtractTimeout,
 				),
+				cfg.MaxDocumentBytes,
 			),
 		),
+		ReadHeaderTimeout: 5 * time.Second,
 	}
 
-	ctx, cancelar := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer cancelar()
+	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer cancel()
 
-	errores := make(chan error, 1)
+	errChan := make(chan error, 1)
 	go func() {
-		errores <- servidor.ListenAndServe()
+		errChan <- servidor.ListenAndServe()
 	}()
-	log.Printf("extractor escuchando en %s", servidor.Addr)
+	log.Printf("extractor listening on %s", servidor.Addr)
 
 	select {
-	case err := <-errores:
-		return fmt.Errorf("servidor http: %w", err)
+	case err := <-errChan:
+		return fmt.Errorf("http server: %w", err)
 	case <-ctx.Done():
 	}
 
-	apagado, cancelarApagado := context.WithTimeout(context.Background(), shutdownGrace)
-	defer cancelarApagado()
-	if err := servidor.Shutdown(apagado); err != nil {
-		return fmt.Errorf("apagado del servidor: %w", err)
+	shutdownCtx, cancelShutdown := context.WithTimeout(context.Background(), cfg.ShutdownGrace)
+	defer cancelShutdown()
+	if err := servidor.Shutdown(shutdownCtx); err != nil {
+		return fmt.Errorf("server shutdown: %w", err)
 	}
 	return nil
 }

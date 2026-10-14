@@ -17,47 +17,44 @@ type ExtractionService interface {
 	Process(ctx context.Context, src domain.DocumentSource) (*domain.ExtractionResult, error)
 }
 
-// maxDocumentBytes es la cota de entrada actual (§9). Pasará a la
-// configuración en cuanto exista internal/config.
-const maxDocumentBytes = 20 * 1024 * 1024
-
 // ExtractionHandler recibe las peticiones del enrutador y las traduce a
 // llamadas al caso de uso.
 type ExtractionHandler struct {
-	service ExtractionService
+	service          ExtractionService
+	maxDocumentBytes int64
 }
 
 // NewExtractionHandler enlaza la capa de API con su caso de uso.
-func NewExtractionHandler(service ExtractionService) *ExtractionHandler {
-	return &ExtractionHandler{service: service}
+func NewExtractionHandler(service ExtractionService, maxDocumentBytes int64) *ExtractionHandler {
+	return &ExtractionHandler{service: service, maxDocumentBytes: maxDocumentBytes}
 }
 
 // HandleExtract atiende POST /extract: acota el cuerpo, lo vuelca a un memfd
 // (§8: cero disco y cero heap de Go), delega en el caso de uso y traduce el
 // resultado o el fallo al contrato. El memfd muere con esta llamada.
 func (h *ExtractionHandler) HandleExtract(w http.ResponseWriter, r *http.Request) {
-	empezado := time.Now()
-	r.Body = http.MaxBytesReader(w, r.Body, maxDocumentBytes)
+	started := time.Now()
+	r.Body = http.MaxBytesReader(w, r.Body, h.maxDocumentBytes)
 
-	fichero, err := ram.NewBuffer(r.Body)
+	file, err := ram.NewBuffer(r.Body)
 	if err != nil {
-		var cuerpoExcesivo *http.MaxBytesError
-		if errors.As(err, &cuerpoExcesivo) {
+		var maxBytesErr *http.MaxBytesError
+		if errors.As(err, &maxBytesErr) {
 			escribirProblema(w, http.StatusRequestEntityTooLarge, "Payload Too Large", "document-too-large", err.Error(), r.URL.Path)
 			return
 		}
 		escribirError(w, err, r.URL.Path)
 		return
 	}
-	defer fichero.Close()
+	defer file.Close()
 
-	resultado, err := h.service.Process(r.Context(), ram.Source(fichero))
+	resultado, err := h.service.Process(r.Context(), ram.Source(file))
 	if err != nil {
 		escribirError(w, err, r.URL.Path)
 		return
 	}
 
-	escribirResultado(w, r, empezado, resultado)
+	escribirResultado(w, r, started, resultado)
 }
 
 // HandleHealth atiende GET /health: el latido del proceso (§5).
