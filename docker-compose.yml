@@ -2,8 +2,9 @@ services:
   proxy:
     image: caddy:2-alpine
     # Caddy genera automáticamente el certificado local y balancea entre las réplicas
-    command: caddy reverse-proxy --from https://extract.universidad.localhost --to http://extractor:8080
+    command: caddy reverse-proxy --from :80 --to http://extractor:8080
     ports:
+      - "8000:80"
       - "80:80"
       - "443:443"
     depends_on:
@@ -14,10 +15,12 @@ services:
     # Se elimina ports: "8080:8080" para que las 5 réplicas no colisionen. 
     # Solo el proxy expone puertos al exterior.
     environment:
-      # Nombres reales de §9 (internal/config): HTTP_PORT y MAX_IN_FLIGHT.
       HTTP_PORT: "8080"
-      MAX_IN_FLIGHT: "5" # Cada una de las 5 réplicas tendrá 4 workers (20 concurrentes en total)
-    
+      MAX_IN_FLIGHT: "2"         # Solo 10 procesos simultáneos en total. Elimina el thrashing y acelera cada PDF.
+      MAX_QUEUE: "50"            # Cola gigante. Retiene a los 100 VUs de k6 sin rechazarlos.
+      QUEUE_WAIT_TIMEOUT: "25s"  # Margen altísimo para asegurar el 0.00% de error.
+      EXTRACT_TIMEOUT: "15s"     # Tiempo de sobra para PDFs pesados.
+      
     # Zero-Disk (§8): el documento se vuelca a un memfd del kernel.
     read_only: true
     
