@@ -23,8 +23,8 @@ func main() {
 	}
 }
 
-// run es el composition root (§7): carga la configuración, cablea las capas
-// de dentro hacia afuera y apaga el servidor ordenadamente.
+// run is the composition root (§7): loads config, wires layers inside-out,
+// and shuts down the server gracefully.
 func run() error {
 	cfg, err := config.LoadFromEnv()
 	if err != nil {
@@ -36,13 +36,13 @@ func run() error {
 		maxInFlight = runtime.NumCPU() // MAX_IN_FLIGHT=0 means NumCPU
 	}
 
-	servidor := &http.Server{
+	server := &http.Server{
 		Addr: ":" + cfg.Port,
 		Handler: api.NewRouter(
 			api.NewExtractionHandler(
 				application.NewExtractionService(
 					poppler.New(),
-					application.NewWorkerPool(maxInFlight, cfg.MaxQueue),
+					application.NewAdmissionControl(maxInFlight, cfg.MaxQueue),
 					cfg.QueueWaitTimeout,
 					cfg.ExtractTimeout,
 				),
@@ -57,9 +57,9 @@ func run() error {
 
 	errChan := make(chan error, 1)
 	go func() {
-		errChan <- servidor.ListenAndServe()
+		errChan <- server.ListenAndServe()
 	}()
-	log.Printf("extractor listening on %s", servidor.Addr)
+	log.Printf("extractor listening on %s", server.Addr)
 
 	select {
 	case err := <-errChan:
@@ -69,7 +69,7 @@ func run() error {
 
 	shutdownCtx, cancelShutdown := context.WithTimeout(context.Background(), cfg.ShutdownGrace)
 	defer cancelShutdown()
-	if err := servidor.Shutdown(shutdownCtx); err != nil {
+	if err := server.Shutdown(shutdownCtx); err != nil {
 		return fmt.Errorf("server shutdown: %w", err)
 	}
 	return nil

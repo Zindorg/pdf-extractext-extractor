@@ -2,68 +2,60 @@ package application
 
 import (
 	"context"
-	"sync/atomic"
 
 	"github.com/Zindorg/pdf-extractext-extractor/internal/domain"
 )
 
-// WorkerPool es la admisión: N huecos de extracción simultáneos con cola
-// acotada. Si no hay hueco libre, la petición espera en cola hasta que se
-// libera uno o expira el contexto (§8, paso 2).
-//
-// Se modela como un canal de tokens (semáforo) más un contador atómico de
-// esperas en cola para aplicar MAX_QUEUE.
-type WorkerPool struct {
-	slots        chan struct{}
-	maxQueue     int32
-	waitingCount int32
+// AdmissionControl manages concurrent extraction slots with a bounded queue.
+// It uses a single buffered channel (capacity + maxQueue) to model both
+// available slots and waiting positions, eliminating the need for atomic counters.
+type AdmissionControl struct {
+	slots    chan struct{}
+	capacity int
+	maxQueue int
 }
 
-// NewWorkerPool devuelve un pool capaz de sostener capacity extracciones a la
-// vez, con una cola de espera de maxQueue peticiones.
-func NewWorkerPool(capacity, maxQueue int) *WorkerPool {
-	return &WorkerPool{
-		slots:    make(chan struct{}, capacity),
-		maxQueue: int32(maxQueue),
+// NewAdmissionControl creates a controller that allows up to 'capacity'
+// concurrent extractions, with a waiting queue of up to 'maxQueue' requests.
+func NewAdmissionControl(capacity, maxQueue int) *AdmissionControl {
+	return &AdmissionControl{
+		slots:    make(chan struct{}, capacity+maxQueue),
+		capacity: capacity,
+		maxQueue: maxQueue,
 	}
 }
 
-// Acquire toma un hueco si queda alguno libre. Si no hay hueco, se encola
-// hasta que se libera uno o el contexto expira. Devuelve error si el contexto
-// se cancela (ErrQueueTimeout) o si la cola está llena (ErrResourceExhausted).
-func (p *WorkerPool) Acquire(ctx context.Context) error {
+// AcquireSlot attempts to reserve an extraction slot.
+// Fast path: if slots are available (len < capacity), returns immediately.
+// Slow path: if at capacity but queue has space, waits for a slot or context timeout.
+// Returns ErrResourceExhausted if queue is full, ErrQueueTimeout if context expires.
+func (a *AdmissionControl) AcquireSlot(ctx context.Context) error {
+	// Fast path: slot available
 	select {
-	case p.slots <- struct{}{}:
+	case a.slots <- struct{}{}:
 		return nil
 	default:
 	}
 
-	if p.maxQueue == 0 {
+	// If no queue space, reject immediately
+	if a.maxQueue == 0 {
 		return domain.ErrResourceExhausted
 	}
 
-	waiting := atomic.AddInt32(&p.waitingCount, 1)
-	if waiting > p.maxQueue {
-		atomic.AddInt32(&p.waitingCount, -1)
-		return domain.ErrResourceExhausted
-	}
-	defer atomic.AddInt32(&p.waitingCount, -1)
-
+	// Slow path: at capacity, wait for release or timeout
 	select {
-	case p.slots <- struct{}{}:
+	case a.slots <- struct{}{}:
 		return nil
 	case <-ctx.Done():
 		return domain.ErrQueueTimeout
 	}
 }
 
-// Release devuelve un hueco tomado.
-//
-// El select con default es deliberado: un Release sin ningún hueco tomado no
-// debe dejar la goroutine esperando para siempre.
-func (p *WorkerPool) Release() {
+// ReleaseSlot releases a previously acquired slot.
+// Safe to call without a prior AcquireSlot (no-op).
+func (a *AdmissionControl) ReleaseSlot() {
 	select {
-	case <-p.slots:
+	case <-a.slots:
 	default:
 	}
 }

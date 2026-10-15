@@ -7,39 +7,39 @@ import (
 	"github.com/Zindorg/pdf-extractext-extractor/internal/domain"
 )
 
-// ExtractionService es el caso de uso de una extracción: admite la petición si
-// hay hueco, delega la extracción en el motor y le devuelve el hueco.
+// ExtractionService is the use case for extraction: admits the request if a
+// slot is available, delegates extraction to the engine, and releases the slot.
 type ExtractionService struct {
-	extractor      domain.TextExtractor
-	pool           *WorkerPool
+	extractor       domain.TextExtractor
+	admission       *AdmissionControl
 	queueWaitTimeout time.Duration
 	extractTimeout   time.Duration
 }
 
-// NewExtractionService enlaza el caso de uso con su motor y su admisión.
-func NewExtractionService(extractor domain.TextExtractor, pool *WorkerPool, queueWaitTimeout, extractTimeout time.Duration) *ExtractionService {
+// NewExtractionService wires the use case with its extractor and admission control.
+func NewExtractionService(extractor domain.TextExtractor, admission *AdmissionControl, queueWaitTimeout, extractTimeout time.Duration) *ExtractionService {
 	return &ExtractionService{
 		extractor:        extractor,
-		pool:             pool,
+		admission:        admission,
 		queueWaitTimeout: queueWaitTimeout,
 		extractTimeout:   extractTimeout,
 	}
 }
 
-// Process extrae el texto de src con un presupuesto de tiempo total dividido en
-// dos fases: espera en cola (queueWaitTimeout) y extracción (extractTimeout).
+// Process extracts text from src with a total time budget split into two
+// phases: queue wait (queueWaitTimeout) and extraction (extractTimeout).
 //
-// Si no hay hueco libre, la petición espera en cola hasta queueWaitTimeout.
-// Una vez conseguido el hueco, la extracción tiene extractTimeout de margen.
-// Ambos plazos se aplican sobre el mismo deadline del contexto original.
+// If no slot is available, the request waits in queue until queueWaitTimeout.
+// Once a slot is acquired, extraction has extractTimeout to complete.
+// Both deadlines derive from the original context.
 func (s *ExtractionService) Process(ctx context.Context, src domain.DocumentSource) (*domain.ExtractionResult, error) {
 	queueCtx, cancelQueue := context.WithTimeout(ctx, s.queueWaitTimeout)
 	defer cancelQueue()
 
-	if err := s.pool.Acquire(queueCtx); err != nil {
+	if err := s.admission.AcquireSlot(queueCtx); err != nil {
 		return nil, err
 	}
-	defer s.pool.Release()
+	defer s.admission.ReleaseSlot()
 
 	extractCtx, cancelExtract := context.WithTimeout(ctx, s.extractTimeout)
 	defer cancelExtract()

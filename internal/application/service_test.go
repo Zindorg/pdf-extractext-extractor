@@ -11,19 +11,19 @@ import (
 	"github.com/Zindorg/pdf-extractext-extractor/internal/domain"
 )
 
-// fixedExtractor es un TextExtractor que siempre devuelve el mismo resultado y
-// no llega a mirar la fuente: este issue admite y delega, no extrae.
+// fixedExtractor is a TextExtractor that always returns the same result and
+// never looks at the source: this test admits and delegates, doesn't extract.
 type fixedExtractor struct{}
 
 func (fixedExtractor) Extract(context.Context, domain.DocumentSource) (*domain.ExtractionResult, error) {
-	return domain.NewExtractionResult("texto extraido", 1), nil
+	return domain.NewExtractionResult("extracted text", 1), nil
 }
 
-// blockingExtractor no sale de Extract hasta que le abran, para que un test
-// pueda mantener un hueco ocupado mientras vuelve a llamar a Process.
+// blockingExtractor doesn't return from Extract until unblocked, allowing a
+// test to hold a slot occupied while calling Process again.
 type blockingExtractor struct {
-	entered chan struct{} // avisa, sin bloquear, de que ya está dentro
-	unblock chan struct{} // el test lo cierra para dejarlo terminar
+	entered chan struct{} // signals, non-blocking, that it's inside
+	unblock chan struct{} // test closes this to let it finish
 }
 
 func (b *blockingExtractor) Extract(context.Context, domain.DocumentSource) (*domain.ExtractionResult, error) {
@@ -33,81 +33,81 @@ func (b *blockingExtractor) Extract(context.Context, domain.DocumentSource) (*do
 	}
 	<-b.unblock
 
-	return domain.NewExtractionResult("texto extraido", 1), nil
+	return domain.NewExtractionResult("extracted text", 1), nil
 }
 
-// emptySource es una fuente que los extractores de este test no llegan a abrir.
+// emptySource is a source that the test extractors never actually open.
 type emptySource struct{}
 
 func (emptySource) Open() (io.ReadCloser, error) {
 	return io.NopCloser(strings.NewReader("")), nil
 }
 
-// Si el hueco no se liberara, esta segunda llamada en serie devolvería
-// ErrResourceExhausted y el servicio se quedaría sin capacidad para siempre.
-func TestProcess_LiberaElHuecoTrasLaExtraccion(t *testing.T) {
-	pool := NewWorkerPool(1, 128)
-	servicio := NewExtractionService(fixedExtractor{}, pool, 8*time.Second, 4*time.Second)
+// If the slot weren't released, this second serial call would return
+// ErrResourceExhausted and the service would lose capacity forever.
+func TestProcess_ReleasesSlotAfterExtraction(t *testing.T) {
+	admission := NewAdmissionControl(1, 128)
+	service := NewExtractionService(fixedExtractor{}, admission, 8*time.Second, 4*time.Second)
 
-	resultado, err := servicio.Process(context.Background(), emptySource{})
+	result, err := service.Process(context.Background(), emptySource{})
 	if err != nil {
-		t.Fatalf("la primera extracción debía funcionar, pero falló con: %v", err)
+		t.Fatalf("first extraction should succeed, got: %v", err)
 	}
-	if resultado.Text != "texto extraido" {
-		t.Errorf("Process() no devolvió el texto que extrajo el adaptador: %q", resultado.Text)
+	if result.Text != "extracted text" {
+		t.Errorf("Process() didn't return the text from the adapter: %q", result.Text)
 	}
 
-	if _, err := servicio.Process(context.Background(), emptySource{}); err != nil {
-		t.Errorf("el hueco no se liberó tras la primera extracción: %v", err)
+	if _, err := service.Process(context.Background(), emptySource{}); err != nil {
+		t.Errorf("slot not released after first extraction: %v", err)
 	}
 }
 
-// Sin hueco libre y sin cola (maxQueue=0), la admisión es inmediata: devuelve
-// ErrResourceExhausted sin esperar.
-func TestProcess_DevuelveErrResourceExhaustedSinHuecoLibre(t *testing.T) {
-	pool := NewWorkerPool(1, 0)
+// With no free slot and no queue (maxQueue=0), admission is immediate:
+// returns ErrResourceExhausted without waiting.
+func TestProcess_ReturnsErrResourceExhaustedWhenNoSlotAvailable(t *testing.T) {
+	admission := NewAdmissionControl(1, 0)
 	extractor := &blockingExtractor{
 		entered: make(chan struct{}, 1),
 		unblock: make(chan struct{}),
 	}
-	servicio := NewExtractionService(extractor, pool, 8*time.Second, 4*time.Second)
+	service := NewExtractionService(extractor, admission, 8*time.Second, 4*time.Second)
 
-	var errOcupada error
-	terminada := make(chan struct{})
+	var errOccupied error
+	done := make(chan struct{})
 	go func() {
-		defer close(terminada)
-		_, errOcupada = servicio.Process(context.Background(), emptySource{})
+		defer close(done)
+		_, errOccupied = service.Process(context.Background(), emptySource{})
 	}()
 
-	<-extractor.entered // la otra petición está dentro de Extract con el hueco tomado
+	<-extractor.entered // the other request is inside Extract holding the slot
 
-	if _, err := servicio.Process(context.Background(), emptySource{}); !errors.Is(err, domain.ErrResourceExhausted) {
-		t.Errorf("Process() con la capacidad agotada devolvió %v; se esperaba %v", err, domain.ErrResourceExhausted)
+	if _, err := service.Process(context.Background(), emptySource{}); !errors.Is(err, domain.ErrResourceExhausted) {
+		t.Errorf("Process() with exhausted capacity returned %v; expected %v", err, domain.ErrResourceExhausted)
 	}
 
 	close(extractor.unblock)
-	<-terminada // el receive del canal sincroniza la lectura de errOcupada
-	if errOcupada != nil {
-		t.Errorf("la extracción que ocupaba el hueco debía terminar bien, pero falló con: %v", errOcupada)
+	<-done // synchronizes read of errOccupied
+	if errOccupied != nil {
+		t.Errorf("extraction holding the slot should succeed, got: %v", errOccupied)
 	}
 
-	if _, err := servicio.Process(context.Background(), emptySource{}); err != nil {
-		t.Errorf("el hueco no volvió a quedar libre al terminar la otra extracción: %v", err)
+	if _, err := service.Process(context.Background(), emptySource{}); err != nil {
+		t.Errorf("slot not free after other extraction finished: %v", err)
 	}
 }
 
-// Un Release sin ningún hueco tomado no debe bloquear la goroutine que lo llama
-// ni, tampoco, fabricar un cupo por encima de la capacidad del pool.
-func TestWorkerPool_ReleaseAdicionalNoSaturaElPool(t *testing.T) {
-	pool := NewWorkerPool(1, 0)
+// A ReleaseSlot without a prior AcquireSlot must not block the calling
+// goroutine, nor create a slot above the pool's capacity.
+func TestAdmissionControl_ExtraReleaseDoesNotSaturate(t *testing.T) {
+	admission := NewAdmissionControl(1, 0)
 
-	pool.Release()
+	admission.ReleaseSlot()
 
 	ctx := context.Background()
-	if err := pool.Acquire(ctx); err != nil {
-		t.Errorf("Acquire() debía conceder el único hueco libre: %v", err)
+	if err := admission.AcquireSlot(ctx); err != nil {
+		t.Errorf("AcquireSlot() should grant the single free slot: %v", err)
 	}
-	if err := pool.Acquire(ctx); !errors.Is(err, domain.ErrResourceExhausted) {
-		t.Errorf("Acquire() concedió un segundo hueco con un pool de capacidad 1: %v", err)
+	if err := admission.AcquireSlot(ctx); !errors.Is(err, domain.ErrResourceExhausted) {
+		t.Errorf("AcquireSlot() granted a second slot with capacity 1: %v", err)
 	}
 }
