@@ -1,10 +1,9 @@
 //go:build linux
 
-// Package ram materializa el documento entrante en un buffer anónimo del
-// kernel (memfd), sin ruta en el sistema de archivos (§7 y §8 de la
-// arquitectura): el cuerpo llega del socket al RAM por io.Copy y nunca pasa
-// por el heap de Go, y el descriptor muere con la petición cuando el handler
-// lo cierra.
+// Package ram materializes the incoming document in an anonymous kernel buffer
+// (memfd), with no filesystem path (§7 and §8 of the architecture): the body
+// goes from socket to RAM via io.Copy and never touches the Go heap; the
+// descriptor dies with the request when the handler closes it.
 package ram
 
 import (
@@ -16,58 +15,58 @@ import (
 	"github.com/Zindorg/pdf-extractext-extractor/internal/domain"
 )
 
-// NewBuffer crea un memfd y vuelca en él lo que produce r: devuelve el
-// fichero ya rebobinado al principio, listo para releerse.
+// NewBuffer creates a memfd and copies r into it, returning the file
+// rewound to the start, ready for re-reading.
 //
-// Si el volcado falla, el descriptor se cierra antes de retornar y NewBuffer
-// devuelve el error que lo causó — p. ej. un *http.MaxBytesError cuando el
-// cuerpo rebasa la cota del handler.
+// If the copy fails, the descriptor is closed before returning and NewBuffer
+// returns the error that caused it — e.g. *http.MaxBytesError when the
+// body exceeds the handler's limit.
 func NewBuffer(r io.Reader) (*os.File, error) {
 	descriptor, err := unix.MemfdCreate("pdf_buffer", 0)
 	if err != nil {
 		return nil, err
 	}
 
-	fichero := os.NewFile(uintptr(descriptor), "pdf_buffer")
-	if _, err := io.Copy(fichero, r); err != nil {
-		fichero.Close()
+	file := os.NewFile(uintptr(descriptor), "pdf_buffer")
+	if _, err := io.Copy(file, r); err != nil {
+		file.Close()
 		return nil, err
 	}
 
-	if _, err := fichero.Seek(0, io.SeekStart); err != nil {
-		fichero.Close()
+	if _, err := file.Seek(0, io.SeekStart); err != nil {
+		file.Close()
 		return nil, err
 	}
 
-	return fichero, nil
+	return file, nil
 }
 
-// fuenteMemfd hace reabrible un memfd para los dos pases de poppler: cada
-// Open() rebobina el base y entrega un descriptor duplicado.
+// MemfdSource makes a memfd re-readable for multiple poppler passes: each
+// Open() rewinds the base and returns a duplicated descriptor.
 //
-// El duplicado es imprescindible: poppler cierra el lector que le dan
-// (internal/adapters/poppler), y dup comparte el puntero de posición de la
-// descripción de archivo — por eso el Seek precede al Dup y queda en el base,
-// que es el que cierra el handler con defer file.Close().
-type fuenteMemfd struct {
-	fichero *os.File
+// The duplicate is essential: poppler closes the reader it is given
+// (internal/adapters/poppler), and dup shares the file offset of the
+// file description — that's why Seek precedes Dup and stays on the base,
+// which is the one the handler closes with defer file.Close().
+type MemfdSource struct {
+	file *os.File
 }
 
-func (f fuenteMemfd) Open() (io.ReadCloser, error) {
-	if _, err := f.fichero.Seek(0, io.SeekStart); err != nil {
+func (m MemfdSource) Open() (io.ReadCloser, error) {
+	if _, err := m.file.Seek(0, io.SeekStart); err != nil {
 		return nil, err
 	}
 
-	duplicado, err := unix.Dup(int(f.fichero.Fd()))
+	dup, err := unix.Dup(int(m.file.Fd()))
 	if err != nil {
 		return nil, err
 	}
 
-	return os.NewFile(uintptr(duplicado), f.fichero.Name()), nil
+	return os.NewFile(uintptr(dup), m.file.Name()), nil
 }
 
-// Source envuelve un memfd en un DocumentSource reabrible. El *os.File sigue
-// en manos del llamador, que debe cerrarlo al terminar la petición.
-func Source(f *os.File) domain.DocumentSource {
-	return fuenteMemfd{fichero: f}
+// Source wraps a memfd in a re-readable DocumentSource. The *os.File remains
+// owned by the caller, who must close it when the request ends.
+func Source(file *os.File) domain.DocumentSource {
+	return MemfdSource{file: file}
 }

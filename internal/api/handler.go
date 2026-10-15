@@ -11,27 +11,27 @@ import (
 	"github.com/Zindorg/pdf-extractext-extractor/internal/domain"
 )
 
-// ExtractionService es lo que la capa de API necesita del caso de uso. El
-// *application.ExtractionService real la cumple sin declararla.
+// ExtractionService is what the API layer needs from the use case.
+// The real *application.ExtractionService implements it implicitly.
 type ExtractionService interface {
 	Process(ctx context.Context, src domain.DocumentSource) (*domain.ExtractionResult, error)
 }
 
-// ExtractionHandler recibe las peticiones del enrutador y las traduce a
-// llamadas al caso de uso.
+// ExtractionHandler receives requests from the router and translates them
+// into use case calls.
 type ExtractionHandler struct {
-	service          ExtractionService
-	maxDocumentBytes int64
+	service           ExtractionService
+	maxDocumentBytes  int64
 }
 
-// NewExtractionHandler enlaza la capa de API con su caso de uso.
+// NewExtractionHandler wires the API layer to its use case.
 func NewExtractionHandler(service ExtractionService, maxDocumentBytes int64) *ExtractionHandler {
 	return &ExtractionHandler{service: service, maxDocumentBytes: maxDocumentBytes}
 }
 
-// HandleExtract atiende POST /extract: acota el cuerpo, lo vuelca a un memfd
-// (§8: cero disco y cero heap de Go), delega en el caso de uso y traduce el
-// resultado o el fallo al contrato. El memfd muere con esta llamada.
+// HandleExtract handles POST /extract: limits the body, dumps it to a memfd
+// (§8: zero disk and zero Go heap), delegates to the use case, and translates
+// the result or error to the contract. The memfd dies with this call.
 func (h *ExtractionHandler) HandleExtract(w http.ResponseWriter, r *http.Request) {
 	started := time.Now()
 	r.Body = http.MaxBytesReader(w, r.Body, h.maxDocumentBytes)
@@ -40,31 +40,31 @@ func (h *ExtractionHandler) HandleExtract(w http.ResponseWriter, r *http.Request
 	if err != nil {
 		var maxBytesErr *http.MaxBytesError
 		if errors.As(err, &maxBytesErr) {
-			escribirProblema(w, http.StatusRequestEntityTooLarge, "Payload Too Large", "document-too-large", err.Error(), r.URL.Path)
+			writeProblem(w, http.StatusRequestEntityTooLarge, "Payload Too Large", "document-too-large", err.Error(), r.URL.Path)
 			return
 		}
-		escribirError(w, err, r.URL.Path)
+		writeError(w, err, r.URL.Path)
 		return
 	}
 	defer file.Close()
 
-	resultado, err := h.service.Process(r.Context(), ram.Source(file))
+	result, err := h.service.Process(r.Context(), ram.Source(file))
 	if err != nil {
-		escribirError(w, err, r.URL.Path)
+		writeError(w, err, r.URL.Path)
 		return
 	}
 
-	escribirResultado(w, r, started, resultado)
+	writeResult(w, r, started, result)
 }
 
-// HandleHealth atiende GET /health: el latido del proceso (§5).
+// HandleHealth handles GET /health: the process heartbeat (§5).
 func (h *ExtractionHandler) HandleHealth(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(saludResponse{Status: "ok"})
+	json.NewEncoder(w).Encode(healthResponse{Status: "ok"})
 }
 
-// extraccionResponse es el cuerpo del 200 (§5), con document_id en eco.
-type extraccionResponse struct {
+// extractionResponse is the 200 body (§5), with document_id echoed back.
+type extractionResponse struct {
 	DocumentID       string `json:"document_id"`
 	ExtractedText    string `json:"extracted_text"`
 	PageCount        int    `json:"page_count"`
@@ -72,69 +72,69 @@ type extraccionResponse struct {
 	ProcessingTimeMS int64  `json:"processing_time_ms"`
 }
 
-// escribirResultado responde el 200 con el eco y las mediciones del §5.
-func escribirResultado(w http.ResponseWriter, r *http.Request, empezado time.Time, resultado *domain.ExtractionResult) {
+// writeResult responds with 200, echoing the request's X-Document-ID and
+// the measurements from §5.
+func writeResult(w http.ResponseWriter, r *http.Request, started time.Time, result *domain.ExtractionResult) {
 	if id := r.Header.Get("X-Document-ID"); id != "" {
 		w.Header().Set("X-Document-ID", id)
 	}
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(extraccionResponse{
+	json.NewEncoder(w).Encode(extractionResponse{
 		DocumentID:       r.Header.Get("X-Document-ID"),
-		ExtractedText:    resultado.Text,
-		PageCount:        resultado.PageCount,
-		Checksum:         resultado.Checksum,
-		ProcessingTimeMS: time.Since(empezado).Milliseconds(),
+		ExtractedText:    result.Text,
+		PageCount:        result.PageCount,
+		Checksum:         result.Checksum,
+		ProcessingTimeMS: time.Since(started).Milliseconds(),
 	})
 }
 
-// saludResponse es el cuerpo del 200 de /health (§5).
-type saludResponse struct {
+// healthResponse is the 200 body for /health (§5).
+type healthResponse struct {
 	Status string `json:"status"`
 }
 
-// causa describe un motivo de fallo del contrato (§5): su status, su `type`
-// estable y la cabecera extra que lleva, si lleva.
-type causa struct {
+// errorMapping describes a domain failure reason: its HTTP status, stable
+// `type`, and an extra header if it carries one.
+type errorMapping struct {
 	err        error
 	status     int
 	title      string
-	sufijo     string
+	suffix     string
 	retryAfter string
 }
 
-// motivos es la tabla de equivalencias entre el dominio y RFC 9457.
-var motivos = []causa{
-	{err: domain.ErrDocumentTooLarge, status: http.StatusRequestEntityTooLarge, title: "Payload Too Large", sufijo: "document-too-large"},
-	{err: domain.ErrEncryptedDocument, status: http.StatusUnprocessableEntity, title: "Unprocessable Entity", sufijo: "encrypted-document"},
-	{err: domain.ErrCorruptDocument, status: http.StatusUnprocessableEntity, title: "Unprocessable Entity", sufijo: "corrupt-document"},
-	{err: domain.ErrResourceExhausted, status: http.StatusTooManyRequests, title: "Too Many Requests", sufijo: "resource-exhausted", retryAfter: "1"},
-	{err: domain.ErrQueueTimeout, status: http.StatusServiceUnavailable, title: "Service Unavailable", sufijo: "queue-timeout", retryAfter: "5"},
-	{err: domain.ErrExtractionTimeout, status: http.StatusGatewayTimeout, title: "Gateway Timeout", sufijo: "extraction-timeout"},
+// errorMappings is the equivalence table between domain and RFC 9457.
+var errorMappings = []errorMapping{
+	{err: domain.ErrDocumentTooLarge, status: http.StatusRequestEntityTooLarge, title: "Payload Too Large", suffix: "document-too-large"},
+	{err: domain.ErrEncryptedDocument, status: http.StatusUnprocessableEntity, title: "Unprocessable Entity", suffix: "encrypted-document"},
+	{err: domain.ErrCorruptDocument, status: http.StatusUnprocessableEntity, title: "Unprocessable Entity", suffix: "corrupt-document"},
+	{err: domain.ErrResourceExhausted, status: http.StatusTooManyRequests, title: "Too Many Requests", suffix: "resource-exhausted", retryAfter: "1"},
+	{err: domain.ErrQueueTimeout, status: http.StatusServiceUnavailable, title: "Service Unavailable", suffix: "queue-timeout", retryAfter: "5"},
+	{err: domain.ErrExtractionTimeout, status: http.StatusGatewayTimeout, title: "Gateway Timeout", suffix: "extraction-timeout"},
 }
 
-// escribirError responde el fallo del caso de uso como ProblemDetails. Lo que
-// no es un motivo conocido se oculta tras /problems/internal: el detalle solo
-// le importa a quien ejecuta el servicio.
-func escribirError(w http.ResponseWriter, err error, instance string) {
-	for _, motivo := range motivos {
-		if errors.Is(err, motivo.err) {
-			if motivo.retryAfter != "" {
-				w.Header().Set("Retry-After", motivo.retryAfter)
+// writeError responds to a use case failure as ProblemDetails. Unknown reasons
+// are hidden behind /problems/internal: the detail only matters to the operator.
+func writeError(w http.ResponseWriter, err error, instance string) {
+	for _, mapping := range errorMappings {
+		if errors.Is(err, mapping.err) {
+			if mapping.retryAfter != "" {
+				w.Header().Set("Retry-After", mapping.retryAfter)
 			}
-			escribirProblema(w, motivo.status, motivo.title, motivo.sufijo, err.Error(), instance)
+			writeProblem(w, mapping.status, mapping.title, mapping.suffix, err.Error(), instance)
 			return
 		}
 	}
 
-	escribirProblema(w, http.StatusInternalServerError, "Internal Server Error", "internal", err.Error(), instance)
+	writeProblem(w, http.StatusInternalServerError, "Internal Server Error", "internal", err.Error(), instance)
 }
 
-// escribirProblema escribe un ProblemDetails (RFC 9457).
-func escribirProblema(w http.ResponseWriter, status int, title, sufijo, detail, instance string) {
+// writeProblem writes a ProblemDetails (RFC 9457).
+func writeProblem(w http.ResponseWriter, status int, title, suffix, detail, instance string) {
 	w.Header().Set("Content-Type", "application/problem+json")
 	w.WriteHeader(status)
 	json.NewEncoder(w).Encode(ProblemDetails{
-		Type:     "/problems/" + sufijo,
+		Type:     "/problems/" + suffix,
 		Title:    title,
 		Status:   status,
 		Detail:   detail,

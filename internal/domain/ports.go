@@ -5,15 +5,15 @@ import (
 	"io"
 )
 
-// DocumentSource es un documento legible más de una vez, siempre desde el
-// principio y sin tocar el disco. La implementación real es un descriptor
-// anónimo en RAM (internal/adapters/ram): el mismo descriptor alimenta a
-// pdfinfo y a pdftotext, que son dos lecturas del mismo documento.
+// DocumentSource is a document readable multiple times, always from the
+// beginning and without touching disk. The real implementation is an
+// anonymous RAM descriptor (internal/adapters/ram): Open() returns a
+// duplicated descriptor that allows concurrent reads without interference.
 type DocumentSource interface {
 	Open() (io.ReadCloser, error)
 }
 
-// TextExtractor extrae el texto de un documento legible.
+// TextExtractor extracts text from a readable document.
 type TextExtractor interface {
 	Extract(ctx context.Context, src DocumentSource) (*ExtractionResult, error)
 }
