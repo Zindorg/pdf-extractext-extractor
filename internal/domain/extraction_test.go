@@ -1,6 +1,9 @@
 package domain
 
-import "testing"
+import (
+	"errors"
+	"testing"
+)
 
 // Vectores conocidos de SHA-256, comprobados fuera de Go. Fijar el valor
 // exacto en vez de recalcularlo con crypto/sha256 dentro del test es lo que
@@ -39,5 +42,35 @@ func TestNewExtractionResult_ConservaElTextoYElPageCount(t *testing.T) {
 	}
 	if resultado.PageCount != 12 {
 		t.Errorf("PageCount = %d; se esperaba 12", resultado.PageCount)
+	}
+}
+
+func TestExtractionResult_WithExtractionTimeMsAndWarnings(t *testing.T) {
+	warnings := []Warning{{Code: "partial_extraction", Message: "page 3 skipped"}}
+	resultado := NewExtractionResult("texto", 1).
+		WithExtractionTimeMs(42).
+		WithWarnings(warnings)
+
+	if resultado.ExtractionTimeMs != 42 {
+		t.Errorf("ExtractionTimeMs = %d; want 42", resultado.ExtractionTimeMs)
+	}
+	if len(resultado.Warnings) != 1 || resultado.Warnings[0].Code != "partial_extraction" {
+		t.Errorf("Warnings = %+v; want partial_extraction", resultado.Warnings)
+	}
+}
+
+func TestNewErrorTypes_AreDistinct(t *testing.T) {
+	for _, e := range []error{
+		ErrEmptyDocument,
+		ErrPasswordProtected,
+		ErrUnsupportedFeatures,
+		ErrExtractorFailure,
+	} {
+		if e == nil {
+			t.Error("error no debe ser nil")
+		}
+	}
+	if errors.Is(ErrEmptyDocument, ErrNoTextLayer) {
+		t.Error("ErrEmptyDocument y ErrNoTextLayer deben ser distintos")
 	}
 }

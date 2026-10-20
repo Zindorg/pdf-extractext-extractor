@@ -218,6 +218,7 @@ __marimo__/
 .streamlit/secrets.toml
 
 tests/stress/pdfs/
+workers.md
 
 # Resultados de Vegeta
 targets.txt

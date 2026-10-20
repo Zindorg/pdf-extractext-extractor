@@ -12,4 +12,10 @@ var (
 	ErrExtractionTimeout = errors.New("extraction deadline exceeded")
 	ErrResourceExhausted = errors.New("no workers available")
 	ErrQueueTimeout      = errors.New("queue wait deadline exceeded")
+
+	// NUEVOS — mapeo 1:1 al enum workers.md §Extractor
+	ErrEmptyDocument       = errors.New("extracted text is empty")           // → reason: "empty"
+	ErrPasswordProtected   = errors.New("document requires password")       // → reason: "password_protected"
+	ErrUnsupportedFeatures = errors.New("document has unsupported features") // → reason: "unsupported_features"
+	ErrExtractorFailure    = errors.New("extractor internal failure")       // → reason desconocido → 503
 )
