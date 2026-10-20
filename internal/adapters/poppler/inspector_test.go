@@ -77,12 +77,12 @@ func TestExtract_ValidoDevuelveChecksumDe64Hex(t *testing.T) {
 	}
 }
 
-func TestExtract_SinCapaDeTextoDevuelveErrNoTextLayer(t *testing.T) {
+func TestExtract_SinCapaDeTextoDevuelveErrEmptyDocument(t *testing.T) {
 	inspector := New()
 	resultado, err := inspector.Extract(context.Background(), sourceFor(t, "sin_texto.pdf"))
 
-	if !errors.Is(err, domain.ErrNoTextLayer) {
-		t.Fatalf("err = %v; se esperaba ErrNoTextLayer", err)
+	if !errors.Is(err, domain.ErrEmptyDocument) {
+		t.Fatalf("err = %v; se esperaba ErrEmptyDocument (contrato: reason=empty)", err)
 	}
 	if resultado != nil {
 		t.Errorf("resultado = %+v; se esperaba nil cuando la extracción falla", resultado)

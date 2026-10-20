@@ -1,12 +1,8 @@
 package poppler
 
 import (
-	"bytes"
 	"context"
-	"fmt"
-	"os/exec"
 	"strings"
-	"syscall"
 
 	"github.com/Zindorg/pdf-extractext-extractor/internal/domain"
 )
@@ -24,7 +20,7 @@ func New() *Inspector {
 }
 
 func (i *Inspector) Extract(ctx context.Context, src domain.DocumentSource) (*domain.ExtractionResult, error) {
-	rawText, err := extractWithPdftotext(ctx, src)
+	rawText, elapsedMs, _, err := ExtractWithTiming(ctx, src)
 	if err != nil {
 		return nil, err
 	}
@@ -37,39 +33,24 @@ func (i *Inspector) Extract(ctx context.Context, src domain.DocumentSource) (*do
 
 	// Normalizar saltos de página a párrafos
 	text := strings.TrimSpace(strings.ReplaceAll(rawText, FormFeed, PageBreak))
+
+	var warnings []domain.Warning
 	if text == "" {
-		return nil, domain.ErrNoTextLayer
+		// Texto vacío → reason "empty" (puerta 2 devuelve 422)
+		return nil, domain.ErrEmptyDocument
 	}
 
-	return domain.NewExtractionResult(text, pages), nil
-}
-
-// extractWithPdftotext ejecuta pdftotext y devuelve el texto crudo (con \f).
-func extractWithPdftotext(ctx context.Context, src domain.DocumentSource) (string, error) {
-	entrada, err := src.Open()
-	if err != nil {
-		return "", fmt.Errorf("open source: %w", err)
-	}
-	defer entrada.Close()
-
-	cmd := exec.CommandContext(ctx, "pdftotext", "-", "-")
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	cmd.Cancel = func() error { return matarGrupo(cmd) }
-
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-	cmd.Stdin = entrada
-
-	if err := cmd.Run(); err != nil {
-		exitCode := 0
-		if cmd.ProcessState != nil {
-			exitCode = cmd.ProcessState.ExitCode()
-		}
-		return "", classifyReport(ctx, runDiagnostics{ExitCode: exitCode, Stderr: stderr.String()})
+	// Warning: texto inusualmente corto para la cantidad de páginas
+	if pages > 0 && len(text) < 50 {
+		warnings = append(warnings, domain.Warning{
+			Code:    "low_text_content",
+			Message: "extracted text unusually short for page count",
+		})
 	}
 
-	return stdout.String(), nil
+	return domain.NewExtractionResult(text, pages).
+		WithExtractionTimeMs(elapsedMs).
+		WithWarnings(warnings), nil
 }
 
 var _ domain.TextExtractor = (*Inspector)(nil)
