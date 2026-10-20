@@ -111,3 +111,55 @@ func TestAdmissionControl_ExtraReleaseDoesNotSaturate(t *testing.T) {
 		t.Errorf("AcquireSlot() granted a second slot with capacity 1: %v", err)
 	}
 }
+
+// TestProcess_ExtractionTimeMsExcludesQueueWait verifica que el tiempo
+// reportado en ExtractionTimeMs es solo el de extracción, sin incluir
+// la espera en cola (admission). Esto valida el contrato workers.md
+// que exige extraction_time_ms como "pata del total de la ingesta, no el total".
+func TestProcess_ExtractionTimeMsExcludesQueueWait(t *testing.T) {
+	slowExtractor := &timedExtractor{delay: 50 * time.Millisecond}
+
+	admission := NewAdmissionControl(1, 1)
+	service := NewExtractionService(slowExtractor, admission, 5*time.Second, 5*time.Second)
+
+	done1 := make(chan struct{})
+	go func() {
+		defer close(done1)
+		service.Process(context.Background(), emptySource{})
+	}()
+
+	time.Sleep(10 * time.Millisecond)
+
+	start := time.Now()
+	result, err := service.Process(context.Background(), emptySource{})
+	elapsed := time.Since(start)
+
+	if err != nil {
+		t.Fatalf("Process() failed: %v", err)
+	}
+
+	// ExtractionTimeMs debe ser ~50ms (tiempo de extracción), NO ~60ms (cola + extracción)
+	// Tolerancia ±20ms para absorber variaciones del scheduler
+	if result.ExtractionTimeMs < 30 || result.ExtractionTimeMs > 70 {
+		t.Errorf("ExtractionTimeMs = %dms; se esperaba ~50ms (solo extracción), no %dms (total ±20ms)",
+			result.ExtractionTimeMs, elapsed.Milliseconds())
+	}
+
+	<-done1
+}
+
+// timedExtractor simula extracción con delay y setea ExtractionTimeMs.
+type timedExtractor struct {
+	delay time.Duration
+}
+
+func (t *timedExtractor) Extract(ctx context.Context, src domain.DocumentSource) (*domain.ExtractionResult, error) {
+	start := time.Now()
+	select {
+	case <-time.After(t.delay):
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+	return domain.NewExtractionResult("text", 1).
+		WithExtractionTimeMs(time.Since(start).Milliseconds()), nil
+}
