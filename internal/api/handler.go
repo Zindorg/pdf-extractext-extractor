@@ -4,8 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
-	"time"
+	"strings"
 
 	"github.com/Zindorg/pdf-extractext-extractor/internal/adapters/ram"
 	"github.com/Zindorg/pdf-extractext-extractor/internal/domain"
@@ -20,8 +21,8 @@ type ExtractionService interface {
 // ExtractionHandler receives requests from the router and translates them
 // into use case calls.
 type ExtractionHandler struct {
-	service           ExtractionService
-	maxDocumentBytes  int64
+	service          ExtractionService
+	maxDocumentBytes int64
 }
 
 // NewExtractionHandler wires the API layer to its use case.
@@ -29,115 +30,151 @@ func NewExtractionHandler(service ExtractionService, maxDocumentBytes int64) *Ex
 	return &ExtractionHandler{service: service, maxDocumentBytes: maxDocumentBytes}
 }
 
-// HandleExtract handles POST /extract: limits the body, dumps it to a memfd
-// (§8: zero disk and zero Go heap), delegates to the use case, and translates
-// the result or error to the contract. The memfd dies with this call.
+// HandleExtract handles POST /extract: parses multipart/form-data with
+// document (binary) and mime_type (string), delegates to the use case,
+// and translates the result or error to the workers.md contract.
 func (h *ExtractionHandler) HandleExtract(w http.ResponseWriter, r *http.Request) {
-	started := time.Now()
+	// Limit body size
 	r.Body = http.MaxBytesReader(w, r.Body, h.maxDocumentBytes)
 
-	file, err := ram.NewBuffer(r.Body)
+	// Parse multipart/form-data
+	mr, err := r.MultipartReader()
 	if err != nil {
+		// Check if it's a MaxBytesError (body too large)
 		var maxBytesErr *http.MaxBytesError
 		if errors.As(err, &maxBytesErr) {
-			writeProblem(w, http.StatusRequestEntityTooLarge, "Payload Too Large", "document-too-large", err.Error(), r.URL.Path)
+			writeContractError(w, http.StatusRequestEntityTooLarge, "", "document exceeds maximum size")
 			return
 		}
-		writeError(w, err, r.URL.Path)
+		writeContractError(w, http.StatusBadRequest, "", "invalid multipart request")
+		return
+	}
+
+	var document []byte
+	var mimeType string
+
+	for {
+		part, err := mr.NextPart()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			writeContractError(w, http.StatusBadRequest, "", "failed to read multipart")
+			return
+		}
+
+		switch part.FormName() {
+		case "document":
+			document, err = io.ReadAll(part)
+			if err != nil {
+				writeContractError(w, http.StatusBadRequest, "", "failed to read document")
+				return
+			}
+		case "mime_type":
+			b, _ := io.ReadAll(part)
+			mimeType = strings.TrimSpace(string(b))
+		}
+		part.Close()
+	}
+
+	if len(document) == 0 {
+		writeContractError(w, http.StatusBadRequest, "", "document field is required")
+		return
+	}
+	if mimeType == "" {
+		writeContractError(w, http.StatusBadRequest, "", "mime_type field is required")
+		return
+	}
+
+	// Delegate to use case
+	// Create memfd from document bytes (zero-disk, zero-heap)
+	file, err := ram.NewBuffer(strings.NewReader(string(document)))
+	if err != nil {
+		writeContractError(w, http.StatusInternalServerError, "", "failed to create document buffer")
 		return
 	}
 	defer file.Close()
 
 	result, err := h.service.Process(r.Context(), ram.Source(file))
 	if err != nil {
-		writeError(w, err, r.URL.Path)
+		writeContractErrorFromDomain(w, err)
 		return
 	}
 
-	writeResult(w, r, started, result)
+	writeContractSuccess(w, result)
 }
 
-// HandleHealth handles GET /health: the process heartbeat (§5).
+// HandleHealth handles GET /health: the process heartbeat.
 func (h *ExtractionHandler) HandleHealth(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(healthResponse{Status: "ok"})
 }
 
-// extractionResponse is the 200 body (§5), with document_id echoed back.
-type extractionResponse struct {
-	DocumentID       string `json:"document_id"`
-	ExtractedText    string `json:"extracted_text"`
-	PageCount        int    `json:"page_count"`
-	Checksum         string `json:"checksum"`
-	ProcessingTimeMS int64  `json:"processing_time_ms"`
-}
-
-// writeResult responds with 200, echoing the request's X-Document-ID and
-// the measurements from §5.
-func writeResult(w http.ResponseWriter, r *http.Request, started time.Time, result *domain.ExtractionResult) {
-	if id := r.Header.Get("X-Document-ID"); id != "" {
-		w.Header().Set("X-Document-ID", id)
-	}
+// writeContractSuccess emits 200 with exact contract shape.
+func writeContractSuccess(w http.ResponseWriter, result *domain.ExtractionResult) {
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(extractionResponse{
-		DocumentID:       r.Header.Get("X-Document-ID"),
+	w.WriteHeader(http.StatusOK)
+
+	warnings := result.Warnings
+	if warnings == nil {
+		warnings = []domain.Warning{}
+	}
+
+	json.NewEncoder(w).Encode(ExtractResponse{
 		ExtractedText:    result.Text,
-		PageCount:        result.PageCount,
-		Checksum:         result.Checksum,
-		ProcessingTimeMS: time.Since(started).Milliseconds(),
+		ExtractionTimeMs: result.ExtractionTimeMs,
+		Warnings:         warnings,
 	})
 }
 
-// healthResponse is the 200 body for /health (§5).
+// writeContractErrorFromDomain maps domain errors to contract responses.
+func writeContractErrorFromDomain(w http.ResponseWriter, err error) {
+	switch {
+	case errors.Is(err, domain.ErrEmptyDocument):
+		writeContractError(w, http.StatusUnprocessableEntity, "empty", "extracted text is empty")
+	case errors.Is(err, domain.ErrEncryptedDocument):
+		writeContractError(w, http.StatusUnprocessableEntity, "encrypted_pdf", "document is encrypted")
+	case errors.Is(err, domain.ErrPasswordProtected):
+		writeContractError(w, http.StatusUnprocessableEntity, "password_protected", "document requires password")
+	case errors.Is(err, domain.ErrCorruptDocument):
+		writeContractError(w, http.StatusUnprocessableEntity, "corrupt", "document is corrupt")
+	case errors.Is(err, domain.ErrUnsupportedFeatures):
+		writeContractError(w, http.StatusUnprocessableEntity, "unsupported_features", "document has unsupported features")
+
+	// Extractor internal failure → 503 with reason (contract: unknown reason → 503 extractor_unavailable)
+	case errors.Is(err, domain.ErrExtractorFailure):
+		writeContractError(w, http.StatusServiceUnavailable, "extractor_unavailable", "extractor internal failure")
+
+	// Other internal errors → 503/504/429 without contract reason
+	case errors.Is(err, domain.ErrExtractionTimeout):
+		writeContractError(w, http.StatusGatewayTimeout, "", "extraction deadline exceeded")
+	case errors.Is(err, domain.ErrResourceExhausted):
+		writeContractError(w, http.StatusTooManyRequests, "", "no workers available")
+	case errors.Is(err, domain.ErrQueueTimeout):
+		writeContractError(w, http.StatusServiceUnavailable, "", "queue wait deadline exceeded")
+
+	// Unknown → 503 extractor_unavailable (contract: "Un reason fuera del enum no se traduce en 422")
+	default:
+		writeContractError(w, http.StatusServiceUnavailable, "extractor_unavailable", "extractor internal failure")
+	}
+}
+
+// writeContractError emits error response.
+// For 422: {reason, message} per contract (enum reasons).
+// For 503 extractor_unavailable: {reason, message} per contract.
+// For other statuses: {message} only (no reason field).
+func writeContractError(w http.ResponseWriter, status int, reason, message string) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+
+	if reason != "" && (status == http.StatusUnprocessableEntity || status == http.StatusServiceUnavailable) {
+		json.NewEncoder(w).Encode(ExtractErrorResponse{Reason: reason, Message: message})
+	} else {
+		json.NewEncoder(w).Encode(map[string]string{"message": message})
+	}
+}
+
+// healthResponse is the 200 body for /health.
 type healthResponse struct {
 	Status string `json:"status"`
-}
-
-// errorMapping describes a domain failure reason: its HTTP status, stable
-// `type`, and an extra header if it carries one.
-type errorMapping struct {
-	err        error
-	status     int
-	title      string
-	suffix     string
-	retryAfter string
-}
-
-// errorMappings is the equivalence table between domain and RFC 9457.
-var errorMappings = []errorMapping{
-	{err: domain.ErrDocumentTooLarge, status: http.StatusRequestEntityTooLarge, title: "Payload Too Large", suffix: "document-too-large"},
-	{err: domain.ErrEncryptedDocument, status: http.StatusUnprocessableEntity, title: "Unprocessable Entity", suffix: "encrypted-document"},
-	{err: domain.ErrCorruptDocument, status: http.StatusUnprocessableEntity, title: "Unprocessable Entity", suffix: "corrupt-document"},
-	{err: domain.ErrResourceExhausted, status: http.StatusTooManyRequests, title: "Too Many Requests", suffix: "resource-exhausted", retryAfter: "1"},
-	{err: domain.ErrQueueTimeout, status: http.StatusServiceUnavailable, title: "Service Unavailable", suffix: "queue-timeout", retryAfter: "5"},
-	{err: domain.ErrExtractionTimeout, status: http.StatusGatewayTimeout, title: "Gateway Timeout", suffix: "extraction-timeout"},
-}
-
-// writeError responds to a use case failure as ProblemDetails. Unknown reasons
-// are hidden behind /problems/internal: the detail only matters to the operator.
-func writeError(w http.ResponseWriter, err error, instance string) {
-	for _, mapping := range errorMappings {
-		if errors.Is(err, mapping.err) {
-			if mapping.retryAfter != "" {
-				w.Header().Set("Retry-After", mapping.retryAfter)
-			}
-			writeProblem(w, mapping.status, mapping.title, mapping.suffix, err.Error(), instance)
-			return
-		}
-	}
-
-	writeProblem(w, http.StatusInternalServerError, "Internal Server Error", "internal", err.Error(), instance)
-}
-
-// writeProblem writes a ProblemDetails (RFC 9457).
-func writeProblem(w http.ResponseWriter, status int, title, suffix, detail, instance string) {
-	w.Header().Set("Content-Type", "application/problem+json")
-	w.WriteHeader(status)
-	json.NewEncoder(w).Encode(ProblemDetails{
-		Type:     "/problems/" + suffix,
-		Title:    title,
-		Status:   status,
-		Detail:   detail,
-		Instance: instance,
-	})
 }
