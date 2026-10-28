@@ -1,12 +1,12 @@
 # pdf-extractext-extractor
 
-Microservicio Go 1.22 para extracción de texto desde PDFs. Diseñado como *worker* interno en arquitectura **Hub & Spoke**: expone `POST /extract` síncrono, cumple contrato estricto `workers.md §Extractor`, y prioriza resiliencia, alta concurrencia controlada y **Zero-Disk I/O**.
+Microservicio Go 1.22 para extracción de texto desde PDFs. Diseñado como *worker* interno en arquitectura **Hub & Spoke**: expone `POST /extract` síncrono, cumple contrato estricto [`docs/contract/workers.md`](docs/contract/workers.md) §Extractor, y prioriza resiliencia, alta concurrencia controlada y **Zero-Disk I/O**.
 
 ---
 
 ## 1. Descripción General
 
-**pdf-extractext-extractor** recibe un PDF vía `multipart/form-data`, extrae su texto con `pdftotext` (poppler) y devuelve el resultado en JSON. No escribe en disco, no hace peticiones salientes y no conoce a otros workers (Orquestador, Resumidor, Persistidor).
+**pdf-extractext-extractor** recibe un PDF vía `multipart/form-data`, extrae su texto con `pdftotext` (poppler) y devuelve el resultado en JSON. No escribe en disco, no hace peticiones salientes y no conoce a otros workers (Orquestador, Resumidor, Persistidor). Más información en [docs/README.md](docs/README.md).
 
 **Principios rectores:**
 - **Resiliencia estructural:** nunca colapsa por OOM ni acumula *requests zombis* bajo estrés extremo.

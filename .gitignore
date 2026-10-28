@@ -225,3 +225,29 @@ targets.txt
 results.bin
 results.json
 plot.html
+# Go
+/bin/
+/dist/
+/*.exe
+*.test
+*.out
+coverage.out
+go.work
+go.work.sum
+
+# Artefactos de carga / benchmark (generados, no versionados)
+results.bin
+plot.html
+results.json
+/targets.txt
+*.log
+
+# Entorno
+.env
+!.env.example
+
+# IDEs
+.idea/
+.vscode/
+*.swp
+*.swo
