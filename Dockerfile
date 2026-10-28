@@ -1,38 +1,52 @@
-# Etapa 1: compila el binario. El builder es un Go 1.22 Debian bookworm, igual
-# que el runtime de la etapa 2, para no arrastrar sorpresas de glibc.
-FROM golang:1.22-bookworm AS builder
+# syntax=docker/dockerfile:1
+
+# Extractor: necesita poppler-utils, así que el runtime es debian-slim (no distroless).
+# Se compensa recortando privilegios: usuario sin shell ni home, binario de solo lectura
+# y sin binarios setuid/setgid.
+ARG GO_VERSION=1.27
+
+# ---------- Build ----------
+FROM golang:${GO_VERSION}-bookworm AS build
 WORKDIR /src
 
-# Primero los módulos para aprovechar la caché de capas: solo cambian cuando
-# cambian las dependencias (go.sum existe desde el memfd, Issue 7).
 COPY go.mod go.sum ./
-RUN go mod download
+RUN --mount=type=cache,target=/go/pkg/mod \
+    go mod download && go mod verify
 
+# Requiere .dockerignore (.git, .env, tests, docs) para no copiar basura ni secretos.
 COPY . .
-# CGO_ENABLED=0: binario estático, sin dependencias dinámicas en el runner.
-# -trimpath: rutas reproduciblemente relativas dentro del binario.
-RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -o /extractor ./cmd/server
+RUN --mount=type=cache,target=/go/pkg/mod \
+    --mount=type=cache,target=/root/.cache/go-build \
+    CGO_ENABLED=0 GOOS=linux \
+    go build -trimpath -buildvcs=false -ldflags="-s -w" -o /out/extractor ./cmd/server
 
-# Etapa 2: runtime mínimo. Solo poppler-utils (el motor) y ca-certificates.
+# ---------- Runtime ----------
 FROM debian:bookworm-slim
+
+ARG VERSION=dev
+LABEL org.opencontainers.image.title="pdf-extractext-extractor" \
+      org.opencontainers.image.description="Worker de extracción de texto (poppler)" \
+      org.opencontainers.image.source="https://github.com/Zindorg/pdf-extractext-extractor" \
+      org.opencontainers.image.version="${VERSION}"
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends poppler-utils ca-certificates \
-    && rm -rf /var/lib/apt/lists/*
+    && rm -rf /var/lib/apt/lists/* \
+    # Quita setuid/setgid: ningún binario del runtime puede escalar privilegios.
+    && find / -xdev -perm /6000 -type f -exec chmod a-s {} + 2>/dev/null || true \
+    # Usuario de sistema sin shell ni home.
+    && groupadd --system --gid 10001 appuser \
+    && useradd --system --uid 10001 --gid 10001 --no-create-home \
+               --home-dir /nonexistent --shell /usr/sbin/nologin appuser
 
-# Usuario no-root: el proceso no toca disco (Zero-Disk: el body vive en un
-# memfd del kernel), así que no necesita más privilegios que ejecutar.
-RUN useradd --system --uid 10001 --shell /usr/sbin/nologin appuser
+COPY --from=build --chown=root:root --chmod=0555 /out/extractor /extractor
 
-COPY --from=builder /extractor /extractor
+ENV HTTP_PORT=8080 \
+    GOMAXPROCS=1 \
+    HOME=/nonexistent
 
-# El defecto local de la app es 8081 (§9); la imagen lo marca en 8080 para que
-# un `docker run` suelto matchee el EXPOSE. docker-compose lo inyecta igual.
-ENV HTTP_PORT=8080
-ENV GOMAXPROCS=1
+# Zero-Disk: el documento vive en un memfd, no se escribe nada en el filesystem.
+USER 10001:10001
 
 EXPOSE 8080
-
-USER appuser
-
 ENTRYPOINT ["/extractor"]

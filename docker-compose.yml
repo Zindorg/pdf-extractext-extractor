@@ -1,36 +1,34 @@
 services:
-  proxy:
-    image: caddy:2-alpine
-    # Caddy genera automáticamente el certificado local y balancea entre las réplicas
-    command: caddy reverse-proxy --from :80 --to http://extractor:8080
-    ports:
-      - "8000:80"
-      - "80:80"
-      - "443:443"
-    depends_on:
-      - extractor
-
   extractor:
+    image: pdf-extractext-extractor:v${VERSION:-0.1.0}
     build: .
-    # Se elimina ports: "8080:8080" para que las 5 réplicas no colisionen. 
-    # Solo el proxy expone puertos al exterior.
-    environment:
-      HTTP_PORT: "8080"
-      MAX_IN_FLIGHT: "2"         # Solo 10 procesos simultáneos en total. Elimina el thrashing y acelera cada PDF.
-      MAX_QUEUE: "50"            # Cola gigante. Retiene a los 100 VUs de k6 sin rechazarlos.
-      QUEUE_WAIT_TIMEOUT: "25s"  # Margen altísimo para asegurar el 0.00% de error.
-      EXTRACT_TIMEOUT: "15s"     # Tiempo de sobra para PDFs pesados.
-      
-    # Zero-Disk (§8): el documento se vuelca a un memfd del kernel.
+    restart: unless-stopped
     read_only: true
-    
-    # El apagado ordenado de cmd/server usa 25s.
     stop_grace_period: 30s
-    
-    # Configuración estricta del Trabajo Práctico
+    environment:
+      - TZ=${TZ:-America/Argentina/Mendoza}
+      - HTTP_PORT=8080
+      - MAX_IN_FLIGHT=2
+      - MAX_QUEUE=50
+      - QUEUE_WAIT_TIMEOUT=25s
+      - EXTRACT_TIMEOUT=15s
+    networks:
+      - mired
     deploy:
       replicas: 5
       resources:
         limits:
           cpus: '1.0'
           memory: 1024M
+    labels:
+      - traefik.enable=true
+      - traefik.edge=internal
+      - traefik.docker.network=mired
+      - traefik.http.routers.extractor.rule=Host(`extractor.internal`)
+      - traefik.http.routers.extractor.entrypoints=http
+      - traefik.http.routers.extractor.middlewares=int-ratelimit@file,int-cb@file,int-retry@file
+      - traefik.http.services.extractor.loadbalancer.server.port=8080
+
+networks:
+  mired:
+    external: true
