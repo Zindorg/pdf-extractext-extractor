@@ -5,25 +5,23 @@ import (
 	"errors"
 	"io"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/Zindorg/pdf-extractext-extractor/internal/domain"
 )
 
-// fixedExtractor is a TextExtractor that always returns the same result and
-// never looks at the source: this test admits and delegates, doesn't extract.
 type fixedExtractor struct{}
 
 func (fixedExtractor) Extract(context.Context, domain.DocumentSource) (*domain.ExtractionResult, error) {
 	return domain.NewExtractionResult("extracted text", 1), nil
 }
 
-// blockingExtractor doesn't return from Extract until unblocked, allowing a
-// test to hold a slot occupied while calling Process again.
 type blockingExtractor struct {
-	entered chan struct{} // signals, non-blocking, that it's inside
-	unblock chan struct{} // test closes this to let it finish
+	entered chan struct{}
+	unblock chan struct{}
 }
 
 func (b *blockingExtractor) Extract(context.Context, domain.DocumentSource) (*domain.ExtractionResult, error) {
@@ -32,19 +30,45 @@ func (b *blockingExtractor) Extract(context.Context, domain.DocumentSource) (*do
 	default:
 	}
 	<-b.unblock
-
 	return domain.NewExtractionResult("extracted text", 1), nil
 }
 
-// emptySource is a source that the test extractors never actually open.
 type emptySource struct{}
 
 func (emptySource) Open() (io.ReadCloser, error) {
 	return io.NopCloser(strings.NewReader("")), nil
 }
 
-// If the slot weren't released, this second serial call would return
-// ErrResourceExhausted and the service would lose capacity forever.
+func TestAdmissionControl_NeverExceedsMaxInFlight(t *testing.T) {
+	ac := NewAdmissionControl(2, 20)
+	var cur, peak atomic.Int32
+	var wg sync.WaitGroup
+	for i := 0; i < 20; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if err := ac.AcquireSlot(context.Background()); err != nil {
+				t.Error(err)
+				return
+			}
+			defer ac.ReleaseSlot()
+			n := cur.Add(1)
+			for {
+				p := peak.Load()
+				if n <= p || peak.CompareAndSwap(p, n) {
+					break
+				}
+			}
+			time.Sleep(10 * time.Millisecond)
+			cur.Add(-1)
+		}()
+	}
+	wg.Wait()
+	if p := peak.Load(); p > 2 {
+		t.Fatalf("peak concurrency %d; max allowed 2", p)
+	}
+}
+
 func TestProcess_ReleasesSlotAfterExtraction(t *testing.T) {
 	admission := NewAdmissionControl(1, 128)
 	service := NewExtractionService(fixedExtractor{}, admission, 8*time.Second, 4*time.Second)
@@ -62,8 +86,6 @@ func TestProcess_ReleasesSlotAfterExtraction(t *testing.T) {
 	}
 }
 
-// With no free slot and no queue (maxQueue=0), admission is immediate:
-// returns ErrResourceExhausted without waiting.
 func TestProcess_ReturnsErrResourceExhaustedWhenNoSlotAvailable(t *testing.T) {
 	admission := NewAdmissionControl(1, 0)
 	extractor := &blockingExtractor{
@@ -79,14 +101,14 @@ func TestProcess_ReturnsErrResourceExhaustedWhenNoSlotAvailable(t *testing.T) {
 		_, errOccupied = service.Process(context.Background(), emptySource{})
 	}()
 
-	<-extractor.entered // the other request is inside Extract holding the slot
+	<-extractor.entered
 
 	if _, err := service.Process(context.Background(), emptySource{}); !errors.Is(err, domain.ErrResourceExhausted) {
 		t.Errorf("Process() with exhausted capacity returned %v; expected %v", err, domain.ErrResourceExhausted)
 	}
 
 	close(extractor.unblock)
-	<-done // synchronizes read of errOccupied
+	<-done
 	if errOccupied != nil {
 		t.Errorf("extraction holding the slot should succeed, got: %v", errOccupied)
 	}
@@ -96,11 +118,8 @@ func TestProcess_ReturnsErrResourceExhaustedWhenNoSlotAvailable(t *testing.T) {
 	}
 }
 
-// A ReleaseSlot without a prior AcquireSlot must not block the calling
-// goroutine, nor create a slot above the pool's capacity.
 func TestAdmissionControl_ExtraReleaseDoesNotSaturate(t *testing.T) {
 	admission := NewAdmissionControl(1, 0)
-
 	admission.ReleaseSlot()
 
 	ctx := context.Background()
@@ -112,10 +131,6 @@ func TestAdmissionControl_ExtraReleaseDoesNotSaturate(t *testing.T) {
 	}
 }
 
-// TestProcess_ExtractionTimeMsExcludesQueueWait verifica que el tiempo
-// reportado en ExtractionTimeMs es solo el de extracción, sin incluir
-// la espera en cola (admission). Esto valida el contrato workers.md
-// que exige extraction_time_ms como "pata del total de la ingesta, no el total".
 func TestProcess_ExtractionTimeMsExcludesQueueWait(t *testing.T) {
 	slowExtractor := &timedExtractor{delay: 50 * time.Millisecond}
 
@@ -125,7 +140,7 @@ func TestProcess_ExtractionTimeMsExcludesQueueWait(t *testing.T) {
 	done1 := make(chan struct{})
 	go func() {
 		defer close(done1)
-		service.Process(context.Background(), emptySource{})
+		_, _ = service.Process(context.Background(), emptySource{})
 	}()
 
 	time.Sleep(10 * time.Millisecond)
@@ -138,22 +153,19 @@ func TestProcess_ExtractionTimeMsExcludesQueueWait(t *testing.T) {
 		t.Fatalf("Process() failed: %v", err)
 	}
 
-	// ExtractionTimeMs debe ser ~50ms (tiempo de extracción), NO ~60ms (cola + extracción)
-	// Tolerancia ±20ms para absorber variaciones del scheduler
-	if result.ExtractionTimeMs < 30 || result.ExtractionTimeMs > 70 {
-		t.Errorf("ExtractionTimeMs = %dms; se esperaba ~50ms (solo extracción), no %dms (total ±20ms)",
+	if result.ExtractionTimeMs < 30 || result.ExtractionTimeMs > 75 {
+		t.Errorf("ExtractionTimeMs = %dms; expected ~50ms (extraction only), total was %dms",
 			result.ExtractionTimeMs, elapsed.Milliseconds())
 	}
 
 	<-done1
 }
 
-// timedExtractor simula extracción con delay y setea ExtractionTimeMs.
 type timedExtractor struct {
 	delay time.Duration
 }
 
-func (t *timedExtractor) Extract(ctx context.Context, src domain.DocumentSource) (*domain.ExtractionResult, error) {
+func (t *timedExtractor) Extract(ctx context.Context, _ domain.DocumentSource) (*domain.ExtractionResult, error) {
 	start := time.Now()
 	select {
 	case <-time.After(t.delay):

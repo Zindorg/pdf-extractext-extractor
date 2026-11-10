@@ -6,56 +6,59 @@ import (
 	"github.com/Zindorg/pdf-extractext-extractor/internal/domain"
 )
 
-// AdmissionControl manages concurrent extraction slots with a bounded queue.
-// It uses a single buffered channel (capacity + maxQueue) to model both
-// available slots and waiting positions, eliminating the need for atomic counters.
-type AdmissionControl struct {
-	slots    chan struct{}
-	capacity int
-	maxQueue int
+// AdmissionController abstracts concurrency and queue management (DIP).
+type AdmissionController interface {
+	AcquireSlot(ctx context.Context) error
+	ReleaseSlot()
+	Saturated() bool
 }
 
-// NewAdmissionControl creates a controller that allows up to 'capacity'
-// concurrent extractions, with a waiting queue of up to 'maxQueue' requests.
+// AdmissionControl bounds active workers (running) and queued requests (waiting) separately.
+type AdmissionControl struct {
+	running chan struct{}
+	waiting chan struct{}
+}
+
+// NewAdmissionControl creates a controller with 'capacity' active slots and 'maxQueue' waiting slots[cite: 1, 2].
 func NewAdmissionControl(capacity, maxQueue int) *AdmissionControl {
 	return &AdmissionControl{
-		slots:    make(chan struct{}, capacity+maxQueue),
-		capacity: capacity,
-		maxQueue: maxQueue,
+		running: make(chan struct{}, capacity),
+		waiting: make(chan struct{}, maxQueue),
 	}
 }
 
-// AcquireSlot attempts to reserve an extraction slot.
-// Fast path: if slots are available (len < capacity), returns immediately.
-// Slow path: if at capacity but queue has space, waits for a slot or context timeout.
-// Returns ErrResourceExhausted if queue is full, ErrQueueTimeout if context expires.
+// AcquireSlot reserves an execution slot or waits in the bounded queue[cite: 1, 2].
 func (a *AdmissionControl) AcquireSlot(ctx context.Context) error {
-	// Fast path: slot available
 	select {
-	case a.slots <- struct{}{}:
+	case a.running <- struct{}{}:
 		return nil
 	default:
 	}
 
-	// If no queue space, reject immediately
-	if a.maxQueue == 0 {
+	select {
+	case a.waiting <- struct{}{}:
+	default:
 		return domain.ErrResourceExhausted
 	}
+	defer func() { <-a.waiting }()
 
-	// Slow path: at capacity, wait for release or timeout
 	select {
-	case a.slots <- struct{}{}:
+	case a.running <- struct{}{}:
 		return nil
 	case <-ctx.Done():
 		return domain.ErrQueueTimeout
 	}
 }
 
-// ReleaseSlot releases a previously acquired slot.
-// Safe to call without a prior AcquireSlot (no-op).
+// ReleaseSlot frees an active execution slot[cite: 1, 2].
 func (a *AdmissionControl) ReleaseSlot() {
 	select {
-	case <-a.slots:
+	case <-a.running:
 	default:
 	}
+}
+
+// Saturated reports whether both active slots and the waiting queue are full.
+func (a *AdmissionControl) Saturated() bool {
+	return len(a.running) == cap(a.running) && len(a.waiting) == cap(a.waiting)
 }

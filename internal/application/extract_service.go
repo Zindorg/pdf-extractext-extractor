@@ -7,17 +7,20 @@ import (
 	"github.com/Zindorg/pdf-extractext-extractor/internal/domain"
 )
 
-// ExtractionService is the use case for extraction: admits the request if a
-// slot is available, delegates extraction to the engine, and releases the slot.
+// ExtractionService coordinates slot admission, phase timeouts, and text extraction[cite: 2].
 type ExtractionService struct {
-	extractor       domain.TextExtractor
-	admission       *AdmissionControl
+	extractor        domain.TextExtractor
+	admission        AdmissionController
 	queueWaitTimeout time.Duration
 	extractTimeout   time.Duration
 }
 
-// NewExtractionService wires the use case with its extractor and admission control.
-func NewExtractionService(extractor domain.TextExtractor, admission *AdmissionControl, queueWaitTimeout, extractTimeout time.Duration) *ExtractionService {
+// NewExtractionService wires the use case with its extractor and admission controller[cite: 1, 2].
+func NewExtractionService(
+	extractor domain.TextExtractor,
+	admission AdmissionController,
+	queueWaitTimeout, extractTimeout time.Duration,
+) *ExtractionService {
 	return &ExtractionService{
 		extractor:        extractor,
 		admission:        admission,
@@ -26,12 +29,7 @@ func NewExtractionService(extractor domain.TextExtractor, admission *AdmissionCo
 	}
 }
 
-// Process extracts text from src with a total time budget split into two
-// phases: queue wait (queueWaitTimeout) and extraction (extractTimeout).
-//
-// If no slot is available, the request waits in queue until queueWaitTimeout.
-// Once a slot is acquired, extraction has extractTimeout to complete.
-// Both deadlines derive from the original context.
+// Process acquires a slot within queueWaitTimeout and executes extraction within extractTimeout[cite: 2].
 func (s *ExtractionService) Process(ctx context.Context, src domain.DocumentSource) (*domain.ExtractionResult, error) {
 	queueCtx, cancelQueue := context.WithTimeout(ctx, s.queueWaitTimeout)
 	defer cancelQueue()
