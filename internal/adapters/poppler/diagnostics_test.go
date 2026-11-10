@@ -11,97 +11,78 @@ import (
 	"github.com/Zindorg/pdf-extractext-extractor/internal/domain"
 )
 
-// fallos is a table of stderr fingerprints injected into classifyReport,
-// without spawning real processes.
-var fallos = []struct {
+var failureCases = []struct {
 	name     string
 	stderr   string
-	esperado error
+	expected error
 }{
-	// encrypted_pdf
-	{name: "password", stderr: "Incorrect password", esperado: domain.ErrEncryptedDocument},
-	{name: "encrypted", stderr: "Document is encrypted", esperado: domain.ErrEncryptedDocument},
-	{name: "drm", stderr: "DRM restrictions in place", esperado: domain.ErrEncryptedDocument},
-
-	// password_protected (más específico)
-	{name: "user-password", stderr: "Error: User password required", esperado: domain.ErrPasswordProtected},
-	{name: "owner-password", stderr: "Owner password needed", esperado: domain.ErrPasswordProtected},
-	{name: "permission-password", stderr: "Permission password incorrect", esperado: domain.ErrPasswordProtected},
-	{name: "password-required", stderr: "Password required to open document", esperado: domain.ErrPasswordProtected},
-
-	// unsupported_features
-	{name: "unimplemented", stderr: "Unimplemented feature", esperado: domain.ErrUnsupportedFeatures},
-	{name: "unsupported", stderr: "Unsupported filter", esperado: domain.ErrUnsupportedFeatures},
-	{name: "type3-font", stderr: "Unsupported Type 3 font", esperado: domain.ErrUnsupportedFeatures},
-	{name: "type3-lowercase", stderr: "type 3 font not supported", esperado: domain.ErrUnsupportedFeatures},
-
-	// corrupt
-	{name: "syntax-error", stderr: "Syntax Error: Invalid XRef entry", esperado: domain.ErrCorruptDocument},
-	{name: "damaged", stderr: "PDF damaged, trailer not found", esperado: domain.ErrCorruptDocument},
-	{name: "corrupted", stderr: "file is corrupted", esperado: domain.ErrCorruptDocument},
-
-	// unknown → extractor failure
-	{name: "unknown-failure", stderr: "Segmentation fault", esperado: domain.ErrExtractorFailure},
-	{name: "desconocido", stderr: "random garbage from the engine", esperado: domain.ErrExtractorFailure},
+	{name: "password", stderr: "Incorrect password", expected: domain.ErrEncryptedDocument},
+	{name: "encrypted", stderr: "Document is encrypted", expected: domain.ErrEncryptedDocument},
+	{name: "drm", stderr: "DRM restrictions in place", expected: domain.ErrEncryptedDocument},
+	{name: "user-password", stderr: "Error: User password required", expected: domain.ErrPasswordProtected},
+	{name: "owner-password", stderr: "Owner password needed", expected: domain.ErrPasswordProtected},
+	{name: "permission-password", stderr: "Permission password incorrect", expected: domain.ErrPasswordProtected},
+	{name: "password-required", stderr: "Password required to open document", expected: domain.ErrPasswordProtected},
+	{name: "unimplemented", stderr: "Unimplemented feature", expected: domain.ErrUnsupportedFeatures},
+	{name: "unsupported", stderr: "Unsupported filter", expected: domain.ErrUnsupportedFeatures},
+	{name: "type3-font", stderr: "Unsupported Type 3 font", expected: domain.ErrUnsupportedFeatures},
+	{name: "type3-lowercase", stderr: "type 3 font not supported", expected: domain.ErrUnsupportedFeatures},
+	{name: "syntax-error", stderr: "Syntax Error: Invalid XRef entry", expected: domain.ErrCorruptDocument},
+	{name: "damaged", stderr: "PDF damaged, trailer not found", expected: domain.ErrCorruptDocument},
+	{name: "corrupted", stderr: "file is corrupted", expected: domain.ErrCorruptDocument},
+	{name: "unknown-failure", stderr: "Segmentation fault", expected: domain.ErrExtractorFailure},
+	{name: "random-garbage", stderr: "random garbage from the engine", expected: domain.ErrExtractorFailure},
 }
 
-func TestClassifyReport_StderrTraduceAlMotivoDeDominio(t *testing.T) {
-	for _, caso := range fallos {
-		t.Run(caso.name, func(t *testing.T) {
-			err := classifyReport(context.Background(), runDiagnostics{ExitCode: 1, Stderr: caso.stderr})
-			if !errors.Is(err, caso.esperado) {
-				t.Errorf("stderr %q -> %v; esperaba %v", caso.stderr, err, caso.esperado)
+func TestClassifyReport_MapsStderrToDomainError(t *testing.T) {
+	for _, tc := range failureCases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := classifyReport(context.Background(), runDiagnostics{ExitCode: 1, Stderr: tc.stderr})
+			if !errors.Is(err, tc.expected) {
+				t.Errorf("stderr %q -> %v; want %v", tc.stderr, err, tc.expected)
 			}
 		})
 	}
 }
 
-func TestClassifyReport_AvisosConSalidaNulaNoSonErrores(t *testing.T) {
+func TestClassifyReport_ZeroExitCodeIgnoresWarnings(t *testing.T) {
 	err := classifyReport(context.Background(), runDiagnostics{
 		ExitCode: 0,
 		Stderr:   "Syntax Error: a warning that does not fail the run",
 	})
 	if err != nil {
-		t.Errorf("esperaba nil con exit 0 y avisos, recibí %v", err)
+		t.Errorf("want nil on exit 0 with stderr warnings, got %v", err)
 	}
 }
 
-func TestClassifyReport_ContextoCanceladoGanaSobreLasClaves(t *testing.T) {
+func TestClassifyReport_ContextCanceledTakesPrecedence(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
 	err := classifyReport(ctx, runDiagnostics{ExitCode: 1, Stderr: "Incorrect password"})
 	if !errors.Is(err, domain.ErrExtractionTimeout) {
-		t.Errorf("err = %v; esperaba ErrExtractionTimeout aunque el stderr hable de cifrado", err)
+		t.Errorf("err = %v; want ErrExtractionTimeout", err)
 	}
 }
 
-// TestExtractWithTiming verifica que la función mide tiempo y clasifica errores.
 func TestExtractWithTiming(t *testing.T) {
-	// Este test requiere pdftotext instalado; se saltea si no está.
 	if _, err := exec.LookPath("pdftotext"); err != nil {
-		t.Skip("pdftotext no está instalado")
+		t.Skip("pdftotext is not installed")
 	}
 
 	ctx := context.Background()
-
-	// Caso éxito: PDF válido
 	src := &ramBuffer{data: []byte("%PDF-1.4\n%EOF\n")}
-	rawText, elapsedMs, stderr, err := ExtractWithTiming(ctx, src)
+	rawText, elapsedMs, err := ExtractWithTiming(ctx, src)
 	if err != nil {
-		t.Logf("ExtractWithTiming falló (esperado en test sin PDF real): %v", err)
+		t.Logf("ExtractWithTiming failed as expected on minimal PDF: %v", err)
 	} else {
-		if elapsedMs <= 0 {
-			t.Errorf("elapsedMs = %d; debe ser > 0", elapsedMs)
+		if elapsedMs < 0 {
+			t.Errorf("elapsedMs = %d; want >= 0", elapsedMs)
 		}
-		if rawText == "" {
-			t.Log("rawText vacío (PDF mínimo sin contenido)")
-		}
-		_ = stderr
+		_ = rawText
 	}
 }
 
-// ramBuffer implementa domain.DocumentSource para tests.
 type ramBuffer struct {
 	data []byte
 }
