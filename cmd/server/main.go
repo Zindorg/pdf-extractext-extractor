@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/Zindorg/pdf-extractext-extractor/internal/adapters/cache"
+	"github.com/Zindorg/pdf-extractext-extractor/internal/adapters/consul"
 	"github.com/Zindorg/pdf-extractext-extractor/internal/adapters/poppler"
 	"github.com/Zindorg/pdf-extractext-extractor/internal/adapters/ram"
 	"github.com/Zindorg/pdf-extractext-extractor/internal/adapters/resilience"
@@ -38,7 +39,7 @@ func main() {
 }
 
 // run is the composition root: loads config, wires layers inside-out,
-// drains traffic on SIGTERM, and shuts down gracefully.
+// registers in Consul (if configured), drains traffic on SIGTERM, and shuts down gracefully.
 func run(logger *slog.Logger) error {
 	cfg, err := config.LoadFromEnv()
 	if err != nil {
@@ -50,8 +51,6 @@ func run(logger *slog.Logger) error {
 		maxInFlight = runtime.NumCPU()
 	}
 
-	// Decoradores sobre el puerto domain.TextExtractor (OCP + DIP):
-	// Poppler -> Circuit Breaker & Retry -> In-Memory Cache
 	baseExtractor := poppler.New()
 	resilientExtractor := resilience.NewResilientExtractor(
 		baseExtractor,
@@ -82,7 +81,6 @@ func run(logger *slog.Logger) error {
 
 	mux := api.NewRouter(handler, ready)
 
-	// Pipeline de Middlewares HTTP: Observe -> RateLimit -> Idempotency -> Router
 	httpHandler := api.Idempotency(cfg.CacheTTL, mux)
 	httpHandler = api.RateLimit(cfg.RateLimitRPS, cfg.RateLimitBurst, httpHandler)
 	httpHandler = api.Observe(logger, httpHandler)
@@ -108,10 +106,17 @@ func run(logger *slog.Logger) error {
 		"addr", server.Addr,
 		"max_in_flight", maxInFlight,
 		"max_queue", cfg.MaxQueue,
-		"rate_limit_rps", cfg.RateLimitRPS,
-		"cb_threshold", cfg.CBFailureThresh,
-		"max_retries", cfg.MaxRetries,
 	)
+
+	var registrar *consul.Registrar
+	if cfg.ConsulAddr != "" {
+		r, err := consul.NewRegistrar(cfg.ConsulAddr, cfg.ServiceName, cfg.ServiceAddress, cfg.Port)
+		if err != nil {
+			return err
+		}
+		registrar = r
+		go registerWithRetry(ctx, logger, registrar)
+	}
 
 	select {
 	case err := <-errChan:
@@ -122,9 +127,20 @@ func run(logger *slog.Logger) error {
 	case <-ctx.Done():
 	}
 
-	// 12-Factor IX (Disposability): mark unready and drain before closing listeners.
+	// 12-Factor IX (Disposability): deregister from Consul, mark unready, and drain before closing.
 	logger.Info("extractor_draining")
 	draining.Store(true)
+
+	if registrar != nil {
+		deregCtx, cancelDereg := context.WithTimeout(context.Background(), 5*time.Second)
+		if err := registrar.Deregister(deregCtx); err != nil {
+			logger.Warn("consul_deregister_failed", "service_id", registrar.ServiceID(), "error", err.Error())
+		} else {
+			logger.Info("consul_deregistered", "service_id", registrar.ServiceID())
+		}
+		cancelDereg()
+	}
+
 	time.Sleep(5 * time.Second)
 
 	shutdownCtx, cancelShutdown := context.WithTimeout(context.Background(), cfg.ShutdownGrace)
@@ -134,6 +150,27 @@ func run(logger *slog.Logger) error {
 	}
 	logger.Info("extractor_stopped")
 	return nil
+}
+
+func registerWithRetry(ctx context.Context, logger *slog.Logger, r *consul.Registrar) {
+	for attempt := 1; attempt <= 10; attempt++ {
+		if err := r.Register(ctx); err != nil {
+			logger.Warn("consul_register_retry",
+				"attempt", attempt,
+				"service_id", r.ServiceID(),
+				"error", err.Error(),
+			)
+			select {
+			case <-time.After(2 * time.Second):
+				continue
+			case <-ctx.Done():
+				return
+			}
+		}
+		logger.Info("consul_registered", "service_id", r.ServiceID())
+		return
+	}
+	logger.Error("consul_register_abandoned", "service_id", r.ServiceID())
 }
 
 func probe(port string) int {

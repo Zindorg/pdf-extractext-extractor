@@ -19,6 +19,8 @@ services:
       - GOMEMLIMIT=800MiB          # ~80 % del límite del cgroup
       - GOMAXPROCS=1
       - MAX_DOCUMENT_BYTES=20971520
+      - CONSUL_HTTP_ADDR=${CONSUL_HTTP_ADDR:-http://consul:8500}
+      - SERVICE_NAME=extractor
     healthcheck:
       test: ["CMD", "/extractor", "-healthcheck"]
       interval: 10s

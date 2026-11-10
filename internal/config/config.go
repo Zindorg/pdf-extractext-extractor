@@ -34,6 +34,11 @@ type Config struct {
 	RetryBackoff    time.Duration
 	CacheTTL        time.Duration
 	CacheMaxEntries int
+
+	// Service Discovery (Consul)
+	ConsulAddr     string
+	ServiceName    string
+	ServiceAddress string
 }
 
 // Nombres de las variables de entorno y defectos que fija §9.
@@ -78,6 +83,12 @@ const (
 	defaultRetryBackoff    = 100 * time.Millisecond
 	defaultCacheTTL        = 5 * time.Minute
 	defaultCacheMaxEntries = 100
+
+	// Service Discovery (Consul)
+	envConsulAddr      = "CONSUL_HTTP_ADDR"
+	envServiceName     = "SERVICE_NAME"
+	envServiceAddress  = "SERVICE_ADDRESS"
+	defaultServiceName = "extractor"
 )
 
 // LoadFromEnv lee y valida la configuración del entorno.
@@ -160,6 +171,11 @@ func LoadFromEnv() (*Config, error) {
 		return nil, err
 	}
 
+	serviceName := os.Getenv(envServiceName)
+	if serviceName == "" {
+		serviceName = defaultServiceName
+	}
+
 	return &Config{
 		Port:             port,
 		MaxInFlight:      maxInFlight,
@@ -176,6 +192,9 @@ func LoadFromEnv() (*Config, error) {
 		RetryBackoff:     retryBackoff,
 		CacheTTL:         cacheTTL,
 		CacheMaxEntries:  cacheMaxEntries,
+		ConsulAddr:       os.Getenv(envConsulAddr),
+		ServiceName:      serviceName,
+		ServiceAddress:   os.Getenv(envServiceAddress),
 	}, nil
 }
 
