@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"flag"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -21,6 +22,12 @@ import (
 )
 
 func main() {
+	healthcheck := flag.Bool("healthcheck", false, "probe for Docker HEALTHCHECK")
+	flag.Parse()
+	if *healthcheck {
+		os.Exit(probe(os.Getenv("HTTP_PORT")))
+	}
+
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
 	if err := run(logger); err != nil {
 		logger.Error("server_failed", "error", err.Error())
@@ -29,7 +36,7 @@ func main() {
 }
 
 // run is the composition root: loads config, wires layers inside-out,
-// drains traffic on SIGTERM, and shuts down gracefully[cite: 1, 2].
+// drains traffic on SIGTERM, and shuts down gracefully.
 func run(logger *slog.Logger) error {
 	cfg, err := config.LoadFromEnv()
 	if err != nil {
@@ -85,7 +92,7 @@ func run(logger *slog.Logger) error {
 	case <-ctx.Done():
 	}
 
-	// 12-Factor IX (Disposability): mark unready and drain before closing listeners[cite: 1].
+	// 12-Factor IX (Disposability): mark unready and drain before closing listeners.
 	logger.Info("extractor_draining")
 	draining.Store(true)
 	time.Sleep(5 * time.Second)
@@ -97,4 +104,17 @@ func run(logger *slog.Logger) error {
 	}
 	logger.Info("extractor_stopped")
 	return nil
+}
+
+func probe(port string) int {
+	if port == "" {
+		port = "8081"
+	}
+	c := http.Client{Timeout: 2 * time.Second}
+	resp, err := c.Get("http://127.0.0.1:" + port + "/health")
+	if err != nil || resp.StatusCode != http.StatusOK {
+		return 1
+	}
+	_ = resp.Body.Close()
+	return 0
 }
