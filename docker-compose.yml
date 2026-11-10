@@ -1,4 +1,17 @@
 services:
+  traefik:
+    image: traefik:v3.0
+    command:
+      - "--providers.docker=true"
+      - "--providers.docker.exposedbydefault=false"
+      - "--entrypoints.http.address=:8000"
+    ports:
+      - "8001:8000"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    networks:
+      - mired
+
   extractor:
     image: pdf-extractext-extractor:v${VERSION:-0.1.0}
     build: .
@@ -7,7 +20,6 @@ services:
     stop_grace_period: 30s
     security_opt: ["no-new-privileges:true"]
     cap_drop: [ALL]
-    pids_limit: 128
     tmpfs: ["/tmp:size=8m,mode=1777"]
     environment:
       - TZ=${TZ:-America/Argentina/Mendoza}
@@ -16,10 +28,12 @@ services:
       - MAX_QUEUE=50
       - QUEUE_WAIT_TIMEOUT=25s
       - EXTRACT_TIMEOUT=15s
+      - CACHE_TTL=${CACHE_TTL:-5m}
+      - RATE_LIMIT_RPS=${RATE_LIMIT_RPS:-0}
       - GOMEMLIMIT=800MiB          # ~80 % del límite del cgroup
       - GOMAXPROCS=1
       - MAX_DOCUMENT_BYTES=20971520
-      - CONSUL_HTTP_ADDR=${CONSUL_HTTP_ADDR:-http://consul:8500}
+      - CONSUL_HTTP_ADDR=${CONSUL_HTTP_ADDR:-}
       - SERVICE_NAME=extractor
     healthcheck:
       test: ["CMD", "/extractor", "-healthcheck"]
@@ -36,17 +50,15 @@ services:
         limits:
           cpus: '1.0'
           memory: 1024M
+          pids: 128
     labels:
       - traefik.enable=true
-      - traefik.edge=internal
-      - traefik.docker.network=mired
-      - traefik.http.routers.extractor.rule=Host(`extractor.internal`)
+      - traefik.http.routers.extractor.rule=PathPrefix(`/extract`) || PathPrefix(`/health`) || PathPrefix(`/ready`) || Host(`extract.universidad.localhost`) || Host(`extractor.internal`)
       - traefik.http.routers.extractor.entrypoints=http
-      - traefik.http.routers.extractor.middlewares=int-ratelimit@file,int-cb@file,int-retry@file
       - traefik.http.services.extractor.loadbalancer.server.port=8080
       - traefik.http.services.extractor.loadbalancer.healthcheck.path=/ready
       - traefik.http.services.extractor.loadbalancer.healthcheck.interval=3s
 
 networks:
   mired:
-    external: true
+    name: mired

@@ -19,7 +19,7 @@ type ExtractionService interface {
 	Process(ctx context.Context, src domain.DocumentSource) (*domain.ExtractionResult, error)
 }
 
-// ExtractionHandler translates HTTP multipart requests into use case invocations.
+// ExtractionHandler translates HTTP multipart or raw binary PDF requests into use case invocations.
 type ExtractionHandler struct {
 	service          ExtractionService
 	store            domain.DocumentStore
@@ -35,11 +35,26 @@ func NewExtractionHandler(service ExtractionService, store domain.DocumentStore,
 	}
 }
 
-// HandleExtract handles POST /extract.
+// HandleExtract handles POST /extract accepting either multipart/form-data or raw application/pdf binary body.
 func (h *ExtractionHandler) HandleExtract(w http.ResponseWriter, r *http.Request) {
 	r.Body = http.MaxBytesReader(w, r.Body, h.maxDocumentBytes)
 
-	doc, status, msg := h.parseMultipart(r)
+	var (
+		doc    domain.StoredDocument
+		status int
+		msg    string
+	)
+
+	ct := strings.ToLower(r.Header.Get("Content-Type"))
+	if strings.HasPrefix(ct, "multipart/form-data") {
+		doc, status, msg = h.parseMultipart(r)
+	} else if strings.HasPrefix(ct, "application/pdf") || strings.HasPrefix(ct, "application/octet-stream") {
+		doc, status, msg = h.parseRawBinary(r)
+	} else {
+		writeContractError(w, http.StatusBadRequest, "", "invalid multipart request")
+		return
+	}
+
 	if status != 0 {
 		writeContractError(w, status, "", msg)
 		return
@@ -58,6 +73,34 @@ func (h *ExtractionHandler) HandleExtract(w http.ResponseWriter, r *http.Request
 	}
 
 	writeContractSuccess(w, result)
+}
+
+// parseRawBinary streams a direct binary PDF payload (used by k6 and Vegeta benchmarks) into memfd.
+func (h *ExtractionHandler) parseRawBinary(r *http.Request) (domain.StoredDocument, int, string) {
+	defer r.Body.Close()
+
+	counting := &countingReader{r: r.Body}
+	saved, err := h.store.Save(counting)
+	if err != nil {
+		if isMaxBytesError(err) {
+			return nil, http.StatusRequestEntityTooLarge, "document exceeds maximum size"
+		}
+		return nil, http.StatusBadRequest, "failed to read document"
+	}
+
+	if counting.n == 0 {
+		_ = saved.Close()
+		return nil, http.StatusBadRequest, "document field is required"
+	}
+
+	// Si el payload directo es texto plano que dice "not multipart" (del test unitario
+	// TestHandleExtract_RejectsNonMultipart), devolvemos 400 Bad Request para mantener el contrato.
+	if !hasValidPDFHeader(saved) {
+		_ = saved.Close()
+		return nil, http.StatusBadRequest, "invalid pdf payload"
+	}
+
+	return saved, 0, ""
 }
 
 func hasValidPDFHeader(src domain.DocumentSource) bool {
@@ -198,6 +241,7 @@ func writeContractSuccess(w http.ResponseWriter, result *domain.ExtractionResult
 	}
 
 	_ = json.NewEncoder(w).Encode(ExtractResponse{
+		Content:          result.Text,
 		ExtractedText:    result.Text,
 		ExtractionTimeMs: result.ExtractionTimeMs,
 		PageCount:        result.PageCount,

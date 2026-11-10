@@ -75,7 +75,7 @@ const (
 	envCacheTTL        = "CACHE_TTL"
 	envCacheMaxEntries = "CACHE_MAX_ENTRIES"
 
-	defaultRateLimitRPS    = 100
+	defaultRateLimitRPS    = 0 // 0 = disabled by default so AdmissionControl handles backpressure
 	defaultRateLimitBurst  = 150
 	defaultCBFailureThresh = 5
 	defaultCBResetTimeout  = 10 * time.Second
