@@ -1,6 +1,7 @@
 package api
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -11,12 +12,14 @@ import (
 	"github.com/Zindorg/pdf-extractext-extractor/internal/domain"
 )
 
-// ExtractionService defines the use case boundary consumed by the HTTP transport layer[cite: 2].
+var pdfMagicBytes = []byte("%PDF-")
+
+// ExtractionService defines the use case boundary consumed by the HTTP transport layer.
 type ExtractionService interface {
 	Process(ctx context.Context, src domain.DocumentSource) (*domain.ExtractionResult, error)
 }
 
-// ExtractionHandler translates HTTP multipart requests into use case invocations[cite: 1, 2].
+// ExtractionHandler translates HTTP multipart requests into use case invocations.
 type ExtractionHandler struct {
 	service          ExtractionService
 	store            domain.DocumentStore
@@ -32,7 +35,7 @@ func NewExtractionHandler(service ExtractionService, store domain.DocumentStore,
 	}
 }
 
-// HandleExtract handles POST /extract[cite: 1, 2].
+// HandleExtract handles POST /extract.
 func (h *ExtractionHandler) HandleExtract(w http.ResponseWriter, r *http.Request) {
 	r.Body = http.MaxBytesReader(w, r.Body, h.maxDocumentBytes)
 
@@ -43,6 +46,11 @@ func (h *ExtractionHandler) HandleExtract(w http.ResponseWriter, r *http.Request
 	}
 	defer doc.Close()
 
+	if !hasValidPDFHeader(doc) {
+		writeContractErrorFromDomain(w, domain.ErrCorruptDocument)
+		return
+	}
+
 	result, err := h.service.Process(r.Context(), doc)
 	if err != nil {
 		writeContractErrorFromDomain(w, err)
@@ -50,6 +58,21 @@ func (h *ExtractionHandler) HandleExtract(w http.ResponseWriter, r *http.Request
 	}
 
 	writeContractSuccess(w, result)
+}
+
+func hasValidPDFHeader(src domain.DocumentSource) bool {
+	rc, err := src.Open()
+	if err != nil {
+		return false
+	}
+	defer rc.Close()
+
+	header := make([]byte, len(pdfMagicBytes))
+	n, err := io.ReadFull(rc, header)
+	if err != nil || n < len(pdfMagicBytes) {
+		return false
+	}
+	return bytes.Equal(header, pdfMagicBytes)
 }
 
 // parseMultipart extracts and validates the multipart fields, streaming the document into DocumentStore.
@@ -135,6 +158,10 @@ func (h *ExtractionHandler) parseMultipart(r *http.Request) (domain.StoredDocume
 		cleanup()
 		return nil, http.StatusBadRequest, "mime_type field is required"
 	}
+	if mimeType != "application/pdf" {
+		cleanup()
+		return nil, http.StatusBadRequest, "mime_type must be application/pdf"
+	}
 
 	return doc, 0, ""
 }
@@ -155,7 +182,7 @@ func isMaxBytesError(err error) bool {
 	return errors.As(err, &mbe)
 }
 
-// HandleHealth handles GET /health[cite: 2].
+// HandleHealth handles GET /health.
 func (h *ExtractionHandler) HandleHealth(w http.ResponseWriter, _ *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(healthResponse{Status: "ok"})
@@ -186,7 +213,7 @@ type errorEntry struct {
 	message string
 }
 
-// errorMappings maps domain sentinel errors to HTTP responses in a table (OCP)[cite: 1].
+// errorMappings maps domain sentinel errors to HTTP responses in a table (OCP).
 var errorMappings = []errorEntry{
 	{domain.ErrEmptyDocument, http.StatusUnprocessableEntity, "empty", "extracted text is empty"},
 	{domain.ErrEncryptedDocument, http.StatusUnprocessableEntity, "encrypted_pdf", "document is encrypted"},
@@ -211,6 +238,9 @@ func writeContractErrorFromDomain(w http.ResponseWriter, err error) {
 
 func writeContractError(w http.ResponseWriter, status int, reason, message string) {
 	w.Header().Set("Content-Type", "application/json")
+	if status == http.StatusTooManyRequests {
+		w.Header().Set("Retry-After", "5")
+	}
 	w.WriteHeader(status)
 
 	if reason != "" && (status == http.StatusUnprocessableEntity || status == http.StatusServiceUnavailable) {
