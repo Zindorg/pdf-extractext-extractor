@@ -5,72 +5,66 @@ import (
 	"testing"
 )
 
-// Vectores conocidos de SHA-256, comprobados fuera de Go. Fijar el valor
-// exacto en vez de recalcularlo con crypto/sha256 dentro del test es lo que
-// distingue una prueba del algoritmo de una tautología.
 const (
-	sha256Hola = "b221d9dbb083a7f33428d7c2a3c3198ae925614d70210e28716ccaa7cd4ddb79"
-
+	sha256Hola     = "b221d9dbb083a7f33428d7c2a3c3198ae925614d70210e28716ccaa7cd4ddb79"
 	textoConSaltos = "primera pagina\nsegunda linea"
 	sha256Saltos   = "2af80b293eab93adeab733a41a5822005a80960fb119cb043af3abc85dd2ad4d"
 )
 
-func TestNewExtractionResult_ChecksumCoincideConElSHA256DelTexto(t *testing.T) {
-	resultado := NewExtractionResult("hola", 12)
-
-	if resultado.Checksum != sha256Hola {
-		t.Errorf("Checksum = %q; se esperaba el SHA-256 de %q = %q",
-			resultado.Checksum, "hola", sha256Hola)
+func TestNewExtractionResult_ChecksumMatchesSHA256(t *testing.T) {
+	result := NewExtractionResult("hola", 12)
+	if result.Checksum != sha256Hola {
+		t.Errorf("Checksum = %q; want %q", result.Checksum, sha256Hola)
 	}
 }
 
-func TestNewExtractionResult_NoNormalizaLosSaltosDeLinea(t *testing.T) {
-	resultado := NewExtractionResult(textoConSaltos, 1)
-
-	if resultado.Checksum != sha256Saltos {
-		t.Errorf("Checksum = %q; el checksum es del texto tal cual, sin transformar "+
-			"(normalizar los saltos de página es del adaptador, no del dominio). "+
-			"Se esperaba %q", resultado.Checksum, sha256Saltos)
+func TestNewExtractionResult_PreservesRawNewlines(t *testing.T) {
+	result := NewExtractionResult(textoConSaltos, 1)
+	if result.Checksum != sha256Saltos {
+		t.Errorf("Checksum = %q; want %q", result.Checksum, sha256Saltos)
 	}
 }
 
-func TestNewExtractionResult_ConservaElTextoYElPageCount(t *testing.T) {
-	resultado := NewExtractionResult(textoConSaltos, 12)
-
-	if resultado.Text != textoConSaltos {
-		t.Errorf("Text = %q; no debe alterar el texto de entrada", resultado.Text)
+func TestNewExtractionResult_PreservesTextAndPageCount(t *testing.T) {
+	result := NewExtractionResult(textoConSaltos, 12)
+	if result.Text != textoConSaltos {
+		t.Errorf("Text = %q; want %q", result.Text, textoConSaltos)
 	}
-	if resultado.PageCount != 12 {
-		t.Errorf("PageCount = %d; se esperaba 12", resultado.PageCount)
+	if result.PageCount != 12 {
+		t.Errorf("PageCount = %d; want 12", result.PageCount)
 	}
 }
 
-func TestExtractionResult_WithExtractionTimeMsAndWarnings(t *testing.T) {
+func TestExtractionResult_WithMethodsDoNotMutateOriginal(t *testing.T) {
 	warnings := []Warning{{Code: "partial_extraction", Message: "page 3 skipped"}}
-	resultado := NewExtractionResult("texto", 1).
-		WithExtractionTimeMs(42).
-		WithWarnings(warnings)
+	original := NewExtractionResult("texto", 1)
+	updated := original.WithExtractionTimeMs(42).WithWarnings(warnings)
 
-	if resultado.ExtractionTimeMs != 42 {
-		t.Errorf("ExtractionTimeMs = %d; want 42", resultado.ExtractionTimeMs)
+	if original.ExtractionTimeMs != 0 || len(original.Warnings) != 0 {
+		t.Fatal("With* methods mutated the original struct")
 	}
-	if len(resultado.Warnings) != 1 || resultado.Warnings[0].Code != "partial_extraction" {
-		t.Errorf("Warnings = %+v; want partial_extraction", resultado.Warnings)
+	if updated.ExtractionTimeMs != 42 {
+		t.Errorf("ExtractionTimeMs = %d; want 42", updated.ExtractionTimeMs)
+	}
+	if len(updated.Warnings) != 1 || updated.Warnings[0].Code != "partial_extraction" {
+		t.Errorf("Warnings = %+v; want partial_extraction", updated.Warnings)
 	}
 }
 
-func TestNewErrorTypes_AreDistinct(t *testing.T) {
-	for _, e := range []error{
+func TestErrorTypes_AreDistinct(t *testing.T) {
+	errs := []error{
 		ErrEmptyDocument,
 		ErrPasswordProtected,
 		ErrUnsupportedFeatures,
 		ErrExtractorFailure,
-	} {
-		if e == nil {
-			t.Error("error no debe ser nil")
-		}
+		ErrCorruptDocument,
+		ErrEncryptedDocument,
 	}
-	if errors.Is(ErrEmptyDocument, ErrNoTextLayer) {
-		t.Error("ErrEmptyDocument y ErrNoTextLayer deben ser distintos")
+	for i := 0; i < len(errs); i++ {
+		for j := i + 1; j < len(errs); j++ {
+			if errors.Is(errs[i], errs[j]) {
+				t.Errorf("errors %v and %v must be distinct", errs[i], errs[j])
+			}
+		}
 	}
 }

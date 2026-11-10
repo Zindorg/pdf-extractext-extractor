@@ -5,19 +5,13 @@ import (
 	"encoding/hex"
 )
 
-// Warning representa un problema no fatal durante la extracción.
-// Vocabulario abierto por contrato (workers.md §Extractor).
+// Warning represents a non-fatal issue encountered during extraction[cite: 2].
 type Warning struct {
 	Code    string `json:"code"`
 	Message string `json:"message"`
 }
 
-// ExtractionResult es el texto extraído de un documento junto con su recuento
-// de páginas, la integridad de ese texto, el tiempo puro de extracción y
-// avisos no fatales.
-//
-// El checksum lo calcula el dominio, no el adaptador: quien extrae el texto no
-// debe saber nada de hashes.
+// ExtractionResult holds the extracted text, page count, SHA-256 checksum, timing, and warnings[cite: 2].
 type ExtractionResult struct {
 	Text             string
 	PageCount        int
@@ -26,32 +20,28 @@ type ExtractionResult struct {
 	Warnings         []Warning
 }
 
-// NewExtractionResult construye el resultado de una extracción y calcula sobre
-// la marcha la integridad del texto.
-//
-// El texto entra tal cual, sin normalizar: si un motor de extracción devuelve
-// saltos de página o espacios de sobra, recortarlos es responsabilidad del
-// adaptador que lo invoca. Aquí solo se mide lo que se recibe.
-func NewExtractionResult(texto string, paginas int) *ExtractionResult {
-	suma := sha256.Sum256([]byte(texto))
-
+// NewExtractionResult builds an ExtractionResult and computes the SHA-256 checksum of text[cite: 2].
+func NewExtractionResult(text string, pageCount int) *ExtractionResult {
+	sum := sha256.Sum256([]byte(text))
 	return &ExtractionResult{
-		Text:      texto,
-		PageCount: paginas,
-		Checksum:  hex.EncodeToString(suma[:]),
+		Text:      text,
+		PageCount: pageCount,
+		Checksum:  hex.EncodeToString(sum[:]),
 	}
 }
 
-// WithExtractionTimeMs inyecta el tiempo medido por el adaptador.
-// Devuelve el mismo puntero para encadenamiento fluido.
+// WithExtractionTimeMs returns a new ExtractionResult copy with the elapsed extraction time set[cite: 1, 2].
 func (r *ExtractionResult) WithExtractionTimeMs(ms int64) *ExtractionResult {
-	r.ExtractionTimeMs = ms
-	return r
+	cp := *r
+	cp.ExtractionTimeMs = ms
+	return &cp
 }
 
-// WithWarnings inyecta avisos no fatales del adaptador.
-// Devuelve el mismo puntero para encadenamiento fluido.
+// WithWarnings returns a new ExtractionResult copy with non-fatal warnings attached[cite: 1, 2].
 func (r *ExtractionResult) WithWarnings(w []Warning) *ExtractionResult {
-	r.Warnings = w
-	return r
+	cp := *r
+	if w != nil {
+		cp.Warnings = append([]Warning(nil), w...)
+	}
+	return &cp
 }
