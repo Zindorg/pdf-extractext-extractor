@@ -2,22 +2,17 @@ package api
 
 import "github.com/Zindorg/pdf-extractext-extractor/internal/domain"
 
-// ExtractRequest es el cuerpo de POST /extract (multipart/form-data).
-// El orquestador ya validó mime_type contra "application/pdf" (puerta 1).
-type ExtractRequest struct {
-	Document []byte // campo "document" (binary)
-	MimeType string // campo "mime_type"
-}
-
-// ExtractResponse es el cuerpo 200 exacto al contrato workers.md §Extractor.
+// ExtractResponse represents the 200 OK JSON payload for POST /extract[cite: 1, 2].
 type ExtractResponse struct {
-	ExtractedText    string          `json:"extracted_text"`
-	ExtractionTimeMs int64           `json:"extraction_time_ms"`
+	ExtractedText    string           `json:"extracted_text"`
+	ExtractionTimeMs int64            `json:"extraction_time_ms"`
+	PageCount        int              `json:"page_count"`
+	Checksum         string           `json:"checksum"`
 	Warnings         []domain.Warning `json:"warnings"`
 }
 
-// ExtractErrorResponse es el cuerpo 422 exacto al contrato.
+// ExtractErrorResponse represents the 422/503 error payload with a contract reason[cite: 2].
 type ExtractErrorResponse struct {
-	Reason  string `json:"reason"`  // enum: empty|encrypted_pdf|password_protected|corrupt|unsupported_features
+	Reason  string `json:"reason"`
 	Message string `json:"message"`
 }

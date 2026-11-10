@@ -11,12 +11,12 @@ import (
 	"time"
 
 	"github.com/Zindorg/pdf-extractext-extractor/internal/adapters/poppler"
+	"github.com/Zindorg/pdf-extractext-extractor/internal/adapters/ram"
 	"github.com/Zindorg/pdf-extractext-extractor/internal/api"
 	"github.com/Zindorg/pdf-extractext-extractor/internal/application"
 	"github.com/Zindorg/pdf-extractext-extractor/internal/config"
 )
 
-// readFixture lee un PDF de testdata/.
 func readFixture(t *testing.T, name string) []byte {
 	t.Helper()
 	path := filepath.Join("..", "..", "internal", "adapters", "poppler", "testdata", name)
@@ -27,22 +27,19 @@ func readFixture(t *testing.T, name string) []byte {
 	return data
 }
 
-// newMultipartRequest crea request multipart con document + mime_type.
 func newMultipartRequest(t *testing.T, document []byte, mimeType string) *http.Request {
 	t.Helper()
 	var buf bytes.Buffer
 	w := multipart.NewWriter(&buf)
 	part, _ := w.CreateFormFile("document", "test.pdf")
-	part.Write(document)
-	w.WriteField("mime_type", mimeType)
-	w.Close()
+	_, _ = part.Write(document)
+	_ = w.WriteField("mime_type", mimeType)
+	_ = w.Close()
 	req := httptest.NewRequest(http.MethodPost, "/extract", &buf)
 	req.Header.Set("Content-Type", w.FormDataContentType())
 	return req
 }
 
-// newTestHandler crea un handler completo (composition root de main.go)
-// para tests de contrato de caja negra.
 func newTestHandler(t *testing.T) *api.ExtractionHandler {
 	t.Helper()
 	cfg := config.Config{
@@ -59,15 +56,15 @@ func newTestHandler(t *testing.T) *api.ExtractionHandler {
 			cfg.QueueWaitTimeout,
 			cfg.ExtractTimeout,
 		),
+		ram.NewStore(),
 		cfg.MaxDocumentBytes,
 	)
 }
 
-// makeRequest ejecuta el router (con el handler) y devuelve el recorder.
 func makeRequest(t *testing.T, handler *api.ExtractionHandler, req *http.Request) *httptest.ResponseRecorder {
 	t.Helper()
 	rec := httptest.NewRecorder()
-	router := api.NewRouter(handler)
+	router := api.NewRouter(handler, nil)
 	router.ServeHTTP(rec, req)
 	return rec
 }
