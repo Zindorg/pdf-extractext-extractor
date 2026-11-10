@@ -14,8 +14,10 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/Zindorg/pdf-extractext-extractor/internal/adapters/cache"
 	"github.com/Zindorg/pdf-extractext-extractor/internal/adapters/poppler"
 	"github.com/Zindorg/pdf-extractext-extractor/internal/adapters/ram"
+	"github.com/Zindorg/pdf-extractext-extractor/internal/adapters/resilience"
 	"github.com/Zindorg/pdf-extractext-extractor/internal/api"
 	"github.com/Zindorg/pdf-extractext-extractor/internal/application"
 	"github.com/Zindorg/pdf-extractext-extractor/internal/config"
@@ -48,9 +50,25 @@ func run(logger *slog.Logger) error {
 		maxInFlight = runtime.NumCPU()
 	}
 
+	// Decoradores sobre el puerto domain.TextExtractor (OCP + DIP):
+	// Poppler -> Circuit Breaker & Retry -> In-Memory Cache
+	baseExtractor := poppler.New()
+	resilientExtractor := resilience.NewResilientExtractor(
+		baseExtractor,
+		cfg.CBFailureThresh,
+		cfg.CBResetTimeout,
+		cfg.MaxRetries,
+		cfg.RetryBackoff,
+	)
+	cachedExtractor := cache.NewCachedExtractor(
+		resilientExtractor,
+		cfg.CacheTTL,
+		cfg.CacheMaxEntries,
+	)
+
 	admission := application.NewAdmissionControl(maxInFlight, cfg.MaxQueue)
 	service := application.NewExtractionService(
-		poppler.New(),
+		cachedExtractor,
 		admission,
 		cfg.QueueWaitTimeout,
 		cfg.ExtractTimeout,
@@ -64,9 +82,14 @@ func run(logger *slog.Logger) error {
 
 	mux := api.NewRouter(handler, ready)
 
+	// Pipeline de Middlewares HTTP: Observe -> RateLimit -> Idempotency -> Router
+	httpHandler := api.Idempotency(cfg.CacheTTL, mux)
+	httpHandler = api.RateLimit(cfg.RateLimitRPS, cfg.RateLimitBurst, httpHandler)
+	httpHandler = api.Observe(logger, httpHandler)
+
 	server := &http.Server{
 		Addr:              ":" + cfg.Port,
-		Handler:           api.Observe(logger, mux),
+		Handler:           httpHandler,
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 
@@ -81,7 +104,14 @@ func run(logger *slog.Logger) error {
 			errChan <- nil
 		}
 	}()
-	logger.Info("extractor_listening", "addr", server.Addr, "max_in_flight", maxInFlight, "max_queue", cfg.MaxQueue)
+	logger.Info("extractor_listening",
+		"addr", server.Addr,
+		"max_in_flight", maxInFlight,
+		"max_queue", cfg.MaxQueue,
+		"rate_limit_rps", cfg.RateLimitRPS,
+		"cb_threshold", cfg.CBFailureThresh,
+		"max_retries", cfg.MaxRetries,
+	)
 
 	select {
 	case err := <-errChan:

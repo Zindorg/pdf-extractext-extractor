@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/Zindorg/pdf-extractext-extractor/internal/domain"
 )
@@ -73,5 +74,63 @@ func TestNewRouter_RejectsUnregisteredMethod(t *testing.T) {
 	mux.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/health", nil))
 	if rec.Code != http.StatusMethodNotAllowed {
 		t.Errorf("POST /health returned %d; want %d", rec.Code, http.StatusMethodNotAllowed)
+	}
+}
+
+func TestRateLimit_BlocksBurstAndSetsRetryAfterHeader(t *testing.T) {
+	stub := &stubService{
+		result: domain.NewExtractionResult("ok", 1).WithExtractionTimeMs(10),
+	}
+	mux := NewRouter(NewExtractionHandler(stub, memoryStore{}, 20*1024*1024), nil)
+	limited := RateLimit(1, 1, mux)
+
+	// 1ra petición consume el único token del bucket -> 200 OK
+	rec1 := httptest.NewRecorder()
+	limited.ServeHTTP(rec1, newMultipartRequest([]byte("%PDF-1.4"), "application/pdf"))
+	if rec1.Code != http.StatusOK {
+		t.Fatalf("first request returned %d; want 200", rec1.Code)
+	}
+
+	// 2da petición inmediata -> 429 Too Many Requests con Retry-After
+	rec2 := httptest.NewRecorder()
+	limited.ServeHTTP(rec2, newMultipartRequest([]byte("%PDF-1.4"), "application/pdf"))
+	if rec2.Code != http.StatusTooManyRequests {
+		t.Fatalf("second request returned %d; want 429", rec2.Code)
+	}
+	if rec2.Header().Get("Retry-After") == "" {
+		t.Error("expected Retry-After header on 429 response")
+	}
+}
+
+func TestIdempotency_ReplaysCachedResponseWithoutCallingServiceTwice(t *testing.T) {
+	stub := &stubService{
+		result: domain.NewExtractionResult("idempotente", 1).WithExtractionTimeMs(15),
+	}
+	mux := NewRouter(NewExtractionHandler(stub, memoryStore{}, 20*1024*1024), nil)
+	handler := Idempotency(time.Minute, mux)
+
+	req1 := newMultipartRequest([]byte("%PDF-1.4"), "application/pdf")
+	req1.Header.Set("Idempotency-Key", "saga-tx-123")
+	rec1 := httptest.NewRecorder()
+	handler.ServeHTTP(rec1, req1)
+
+	if rec1.Code != http.StatusOK {
+		t.Fatalf("first request returned %d; want 200", rec1.Code)
+	}
+
+	// Segunda petición con la misma Idempotency-Key
+	req2 := newMultipartRequest([]byte("%PDF-1.4"), "application/pdf")
+	req2.Header.Set("Idempotency-Key", "saga-tx-123")
+	rec2 := httptest.NewRecorder()
+	handler.ServeHTTP(rec2, req2)
+
+	if rec2.Code != http.StatusOK {
+		t.Fatalf("second request returned %d; want 200", rec2.Code)
+	}
+	if rec2.Header().Get("X-Idempotent-Replay") != "true" {
+		t.Error("expected X-Idempotent-Replay: true header on second request")
+	}
+	if stub.calls != 1 {
+		t.Errorf("service called %d times; want 1", stub.calls)
 	}
 }

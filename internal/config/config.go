@@ -24,31 +24,60 @@ type Config struct {
 
 	// Limits
 	MaxDocumentBytes int64
+
+	// Resilience & Caching (12-Factor)
+	RateLimitRPS    int
+	RateLimitBurst  int
+	CBFailureThresh int
+	CBResetTimeout  time.Duration
+	MaxRetries      int
+	RetryBackoff    time.Duration
+	CacheTTL        time.Duration
+	CacheMaxEntries int
 }
 
 // Nombres de las variables de entorno y defectos que fija §9.
 const (
 	// Server
-	envPort = "HTTP_PORT"
+	envPort     = "HTTP_PORT"
 	defaultPort = "8081"
 
 	// Admission control
-	envMaxInFlight = "MAX_IN_FLIGHT"
-	envMaxQueue    = "MAX_QUEUE"
+	envMaxInFlight     = "MAX_IN_FLIGHT"
+	envMaxQueue        = "MAX_QUEUE"
 	defaultMaxInFlight = 0 // 0 means runtime.NumCPU()
-	defaultMaxQueue = 128
+	defaultMaxQueue    = 128
 
 	// Timeouts
-	envQueueWaitTimeout = "QUEUE_WAIT_TIMEOUT"
-	envExtractTimeout   = "EXTRACT_TIMEOUT"
-	envShutdownGrace    = "SHUTDOWN_GRACE"
-	defaultQueueWait    = 10 * time.Second
-	defaultExtractWait  = 6 * time.Second
+	envQueueWaitTimeout  = "QUEUE_WAIT_TIMEOUT"
+	envExtractTimeout    = "EXTRACT_TIMEOUT"
+	envShutdownGrace     = "SHUTDOWN_GRACE"
+	defaultQueueWait     = 10 * time.Second
+	defaultExtractWait   = 6 * time.Second
 	defaultShutdownGrace = 25 * time.Second
 
 	// Limits
-	envMaxDocumentBytes = "MAX_DOCUMENT_BYTES"
+	envMaxDocumentBytes     = "MAX_DOCUMENT_BYTES"
 	defaultMaxDocumentBytes = 20 * 1024 * 1024 // 20 MiB
+
+	// Resilience & Caching
+	envRateLimitRPS    = "RATE_LIMIT_RPS"
+	envRateLimitBurst  = "RATE_LIMIT_BURST"
+	envCBFailureThresh = "CB_FAILURE_THRESHOLD"
+	envCBResetTimeout  = "CB_RESET_TIMEOUT"
+	envMaxRetries      = "MAX_RETRIES"
+	envRetryBackoff    = "RETRY_BACKOFF"
+	envCacheTTL        = "CACHE_TTL"
+	envCacheMaxEntries = "CACHE_MAX_ENTRIES"
+
+	defaultRateLimitRPS    = 100
+	defaultRateLimitBurst  = 150
+	defaultCBFailureThresh = 5
+	defaultCBResetTimeout  = 10 * time.Second
+	defaultMaxRetries      = 2
+	defaultRetryBackoff    = 100 * time.Millisecond
+	defaultCacheTTL        = 5 * time.Minute
+	defaultCacheMaxEntries = 100
 )
 
 // LoadFromEnv lee y valida la configuración del entorno.
@@ -91,14 +120,62 @@ func LoadFromEnv() (*Config, error) {
 		return nil, err
 	}
 
+	rateLimitRPS, err := parseIntEnv(envRateLimitRPS, defaultRateLimitRPS, 0, 0)
+	if err != nil {
+		return nil, err
+	}
+
+	rateLimitBurst, err := parseIntEnv(envRateLimitBurst, defaultRateLimitBurst, 0, 0)
+	if err != nil {
+		return nil, err
+	}
+
+	cbThresh, err := parseIntEnv(envCBFailureThresh, defaultCBFailureThresh, 1, 0)
+	if err != nil {
+		return nil, err
+	}
+
+	cbReset, err := parseDurationEnv(envCBResetTimeout, defaultCBResetTimeout)
+	if err != nil {
+		return nil, err
+	}
+
+	maxRetries, err := parseIntEnv(envMaxRetries, defaultMaxRetries, 0, 10)
+	if err != nil {
+		return nil, err
+	}
+
+	retryBackoff, err := parseDurationEnv(envRetryBackoff, defaultRetryBackoff)
+	if err != nil {
+		return nil, err
+	}
+
+	cacheTTL, err := parseDurationEnv(envCacheTTL, defaultCacheTTL)
+	if err != nil {
+		return nil, err
+	}
+
+	cacheMaxEntries, err := parseIntEnv(envCacheMaxEntries, defaultCacheMaxEntries, 0, 0)
+	if err != nil {
+		return nil, err
+	}
+
 	return &Config{
-		Port:              port,
-		MaxInFlight:       maxInFlight,
-		MaxQueue:          maxQueue,
-		QueueWaitTimeout:  queueWait,
-		ExtractTimeout:    extractTimeout,
-		ShutdownGrace:     shutdownGrace,
-		MaxDocumentBytes:  maxDocumentBytes,
+		Port:             port,
+		MaxInFlight:      maxInFlight,
+		MaxQueue:         maxQueue,
+		QueueWaitTimeout: queueWait,
+		ExtractTimeout:   extractTimeout,
+		ShutdownGrace:    shutdownGrace,
+		MaxDocumentBytes: maxDocumentBytes,
+		RateLimitRPS:     rateLimitRPS,
+		RateLimitBurst:   rateLimitBurst,
+		CBFailureThresh:  cbThresh,
+		CBResetTimeout:   cbReset,
+		MaxRetries:       maxRetries,
+		RetryBackoff:     retryBackoff,
+		CacheTTL:         cacheTTL,
+		CacheMaxEntries:  cacheMaxEntries,
 	}, nil
 }
 
@@ -112,7 +189,7 @@ func parseIntEnv(key string, defaultVal, min, max int) (int, error) {
 		return 0, fmt.Errorf("config: %s must be an integer >= %d, got %q: %w", key, min, raw, err)
 	}
 	if n < min {
-		return 0, fmt.Errorf("config: %s cannot be negative: %d", key, n)
+		return 0, fmt.Errorf("config: %s cannot be less than %d: %d", key, min, n)
 	}
 	if max > 0 && n > max {
 		return 0, fmt.Errorf("config: %s cannot exceed %d: %d", key, max, n)
