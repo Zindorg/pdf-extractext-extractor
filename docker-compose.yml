@@ -1,20 +1,7 @@
 services:
-  traefik:
-    image: traefik:v3.6
-    command:
-      - "--providers.docker=true"
-      - "--providers.docker.exposedbydefault=false"
-      - "--entrypoints.http.address=:8000"
-    ports:
-      - "8000:8000"
-    volumes:
-      - /var/run/docker.sock:/var/run/docker.sock:ro
-    networks:
-      - mired
-
   extractor:
-    image: pdf-extractext-extractor:v${VERSION:-0.1.0}
-    build: .
+    image: pdf-extractext-extractor:v${VERSIONEXT:-1.0.0}
+    build: ../pdf-extractext-extractor
     restart: unless-stopped
     read_only: true
     stop_grace_period: 30s
@@ -26,26 +13,36 @@ services:
       - HTTP_PORT=8080
       - MAX_IN_FLIGHT=2
       - MAX_QUEUE=50
-      - QUEUE_WAIT_TIMEOUT=25s
-      - EXTRACT_TIMEOUT=15s
+      # Espera en cola + extracción tiene que ser MENOR que EXTRACTOR_TIMEOUT del
+      # orquestador (30 s por defecto): 15 s + 10 s = 25 s.
+      - QUEUE_WAIT_TIMEOUT=${QUEUE_WAIT_TIMEOUT:-15s}
+      - EXTRACT_TIMEOUT=${EXTRACT_TIMEOUT:-10s}
       - CACHE_TTL=${CACHE_TTL:-5m}
       - RATE_LIMIT_RPS=${RATE_LIMIT_RPS:-0}
       - GOMEMLIMIT=800MiB          # ~80 % del límite del cgroup
       - GOMAXPROCS=1
       - MAX_DOCUMENT_BYTES=20971520
-      - CONSUL_HTTP_ADDR=${CONSUL_HTTP_ADDR:-}
+      # Registro en Consul (servicios/consul). Vacía CONSUL_HTTP_ADDR para no registrarse.
+      - CONSUL_HTTP_ADDR=${CONSUL_HTTP_ADDR-http://consul:8500}
+      # Reservado: el registrar actual del extractor todavía no envía token (ACL en `allow`).
+      - CONSUL_HTTP_TOKEN=${CONSUL_HTTP_TOKEN:-}
       - SERVICE_NAME=extractor
+      # OJO con varias réplicas: `extractor` resuelve a cualquiera de ellas, así que el check de
+      # Consul de cada instancia cae en una réplica al azar. Para un check por réplica, borrar
+      # esta línea: el registrar usa entonces el hostname único de cada contenedor.
+      - SERVICE_ADDRESS=extractor
     healthcheck:
       test: ["CMD", "/extractor", "-healthcheck"]
       interval: 10s
       timeout: 3s
       retries: 3
       start_period: 5s
-
-    networks:
-      - mired
+    # Sin `ports:` -> nada se publica al host. Solo es alcanzable desde `mired`.
+    expose:
+      - "8080"
+    networks: [mired]
     deploy:
-      replicas: 5
+      replicas: ${EXTRACTOR_REPLICAS:-2}   # balanceo round-robin vía Traefik
       resources:
         limits:
           cpus: '1.0'
@@ -53,12 +50,20 @@ services:
           pids: 128
     labels:
       - traefik.enable=true
-      - traefik.http.routers.extractor.rule=PathPrefix(`/extract`) || PathPrefix(`/health`) || PathPrefix(`/ready`) || Host(`extract.universidad.localhost`) || Host(`extractor.internal`)
+      - traefik.edge=internal
+      - traefik.docker.network=mired
+      - traefik.http.routers.extractor.rule=Host(`extractor.internal`)
       - traefik.http.routers.extractor.entrypoints=http
+      - traefik.http.routers.extractor.middlewares=int-ratelimit@file,int-cb@file,int-retry@file
+      - traefik.http.routers.extractor.service=extractor
       - traefik.http.services.extractor.loadbalancer.server.port=8080
+      # Saca del balanceo a las réplicas saturadas o en drenaje (GET /ready -> 503).
       - traefik.http.services.extractor.loadbalancer.healthcheck.path=/ready
       - traefik.http.services.extractor.loadbalancer.healthcheck.interval=3s
+      - traefik.http.services.extractor.loadbalancer.healthcheck.timeout=2s
 
 networks:
   mired:
-    name: mired
+    external: true
+    # Nombre REAL de la red en Docker. El orquestador y sus servicios/* la usan como `mired`.
+    name: ${ORCHESTRATOR_NETWORK:-mired}

@@ -305,20 +305,23 @@ EXTRACT_TIMEOUT: "15s"
 
 ---
 
-### 1. Levantar la pila completa (orquestador + 5 réplicas extractor + Caddy proxy)
+### 1. Levantar el extractor (5 réplicas, red externa compartida con el Orquestador)
+
+Este repositorio levanta **solo el worker**. Traefik (público e interno), Consul y Redis viven en el repo del orquestador (`servicios/*`); ambos stacks se comunican por la **red Docker externa** `mired`.
 
 ```bash
-make docker-up
-# o directamente:
-docker compose up -d --build
+# 1) Infra del orquestador ya arriba: red `mired`, traefik-internal y (opcional) consul
+cp .env.example .env
+make docker-up           # crea `mired` si no existe y luego: docker compose up -d --build
 ```
 
-- **Proxy:** Caddy en `:80` / `:443` (balancea entre réplicas por DNS `extractor`).
+- **Red:** externa (`external: true`). Si no existe, `make network` la crea.
+- **Descubrimiento:** el orquestador llama a `http://extractor.internal`; ese nombre es un alias de `traefik-internal` en `mired`, que enruta por `Host` a las 5 réplicas según las labels del compose.
 - **Extractor:** 5 réplicas, `read_only: true`, `cap_drop: ALL`, usuario `appuser` (UID 10001).
 - **Límites por réplica:** `cpus: '1.0'`, `memory: 1024M`.
-- **Healthcheck:** `GET /ready` (vive + huecos libres) cada 10 s.
+- **Healthcheck:** `/extractor -healthcheck` (GET `/health`) cada 10 s; Traefik sondea `GET /ready` (vivo + huecos libres) cada 3 s.
+- **Sin puertos publicados.**
 
----
 
 ### 2. Ejecutar tests localmente
 
@@ -353,16 +356,17 @@ environment:
 ### 4. Arquitectura de red (Hub & Spoke)
 
 ```
-[CLIENTE] → :80 (Caddy/Traefik) → [ORQUESTADOR] → http://extractor:8080/extract → [EXTRACTOR x5]
-                                                              ↑
-                                                      red interna `mired`
+[CLIENTE] → traefik-public → [ORQUESTADOR] → http://extractor.internal → traefik-internal → [EXTRACTOR x5]
+                                   └──────────── red externa compartida `mired` ────────────┘
 ```
 
-- El Extractor **solo** escucha en red interna (`mired`).
-- Sin puertos publicados al exterior; el proxy es la única frontera pública.
-- Descubrimiento por **nombre de servicio DNS** (`extractor:8080`) — cambiar el nombre rompe el despliegue; cambiar la IP no.
+- La red `mired` es **externa**: no la crea este compose; la comparten el stack del orquestador y este.
+- El enrutamiento es por **Host** en `traefik-internal` (Host extractor.internal), vía labels Docker de este compose. Requisitos: `traefik.enable=true`, `traefik.edge=internal`, entrypoint `http`, puerto `8080`.
+- Las réplicas saturadas o en drenaje responden `503` en `/ready` y Traefik las saca del balanceo.
+- Si el nombre real de la red no es `mired`, definir `ORCHESTRATOR_NETWORK` en `.env`.
+- **Plazos:** `QUEUE_WAIT_TIMEOUT + EXTRACT_TIMEOUT` (15 s + 10 s) debe ser menor que `EXTRACTOR_TIMEOUT` del orquestador (30 s).
+- El campo `document_id` que envía el orquestador en el multipart se ignora (el handler descarta campos desconocidos).
 
----
 
 ### Endurecimiento (Hardening) del contenedor
 
@@ -375,7 +379,7 @@ El `Dockerfile` y `docker-compose.yml` aplican defensa en profundidad:
 | **No-new-privileges** | `security_opt: [no-new-privileges:true]` — evita escalada vía setuid. |
 | **Usuario no-root** | `USER appuser` (UID 10001, sin shell, sin home). |
 | **Tmpfs mínimo** | Solo `/tmp:size=8m,mode=1777` para `pdftotext` (requiere directorio escribible). |
-| **Red aislada** | Solo red `mired` (interno); sin egress, sin acceso a BD, sin Traefik. |
+| **Red aislada** | Solo red externa `mired`; sin puertos publicados ni acceso a BD; enrutado únicamente por `traefik-internal`. |
 | **Límites de recursos** | `cpus: '1.0'`, `memory: 1024M` por réplica — evita *noisy neighbor*. |
 | **GOMEMLIMIT** | `GOMEMLIMIT=410MiB` (80 % del cgroup) — GC proactivo antes de OOM. |
 
@@ -413,7 +417,7 @@ pdf-extractext-extractor/
 ├── tools/genfixtures/                 # Generador de fixtures (no se publica)
 ├── docs/adr/                          # ADR-0001…0006 (decisiones arquitectónicas)
 ├── Dockerfile                         # Multi-stage: golang:1.22-bookworm → debian:slim + poppler-utils
-├── docker-compose.yml                 # 5 réplicas + Caddy proxy + límites estrictos
+├── docker-compose.yml                 # 5 réplicas del extractor + labels de traefik-internal, red externa `mired`
 ├── Makefile                           # build, test, docker-up, docker-down
 ├── go.mod / go.sum                    # Go 1.22.2, golang.org/x/sys v0.30.0
 └── README.md                          # Este archivo
